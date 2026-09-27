@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Shorts Studio"
+description = "A local-first workspace for uploading videos, validating media, extracting audio, and transcribing Shorts with Faster-Whisper while keeping all intermediate files on the local machine."
+version = "1.0.0"
+id = "artifacts/shorts-studio"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 23634
+
+[services.development]
+run = "pnpm --filter @workspace/shorts-studio run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/shorts-studio", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/shorts-studio/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "23634"
+BASE_PATH = "/"

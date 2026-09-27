@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: jobs
+    description: Local video processing jobs
 paths:
   /healthz:
     get:
@@ -24,7 +26,101 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /jobs:
+    get:
+      operationId: listJobs
+      tags: [jobs]
+      summary: List local processing jobs
+      responses:
+        "200":
+          description: Processing jobs
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Job"
+    post:
+      operationId: createJob
+      tags: [jobs]
+      summary: Upload a video and start processing
+      description: Accepts the video bytes as application/octet-stream. The original filename is provided in X-File-Name.
+      parameters:
+        - name: X-File-Name
+          in: header
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        "202":
+          description: Processing job created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "400":
+          description: Invalid upload
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /jobs/{jobId}:
+    get:
+      operationId: getJob
+      tags: [jobs]
+      summary: Get processing job status
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Processing job
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Job"
+        "404":
+          description: Job not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /jobs/{jobId}/transcript:
+    get:
+      operationId: getTranscript
+      tags: [jobs]
+      summary: Get the saved word-level transcript
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Transcript JSON
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Transcript"
+        "404":
+          description: Transcript not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
+  parameters:
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
   schemas:
     HealthStatus:
       type: object
@@ -33,4 +129,103 @@ components:
           type: string
       required:
         - status
+    Job:
+      type: object
+      required:
+        - id
+        - filename
+        - status
+        - progress
+        - createdAt
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        filename:
+          type: string
+        status:
+          type: string
+          enum: [queued, validating, extracting_audio, transcribing, completed, failed]
+        progress:
+          type: integer
+          minimum: 0
+          maximum: 100
+        durationSeconds:
+          type: ["number", "null"]
+        media:
+          type: ["object", "null"]
+          additionalProperties: true
+        transcript:
+          type: ["object", "null"]
+          additionalProperties: true
+        error:
+          type: ["string", "null"]
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Transcript:
+      type: object
+      required:
+        - jobId
+        - language
+        - segments
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        language:
+          type: string
+        durationSeconds:
+          type: ["number", "null"]
+        segments:
+          type: array
+          items:
+            $ref: "#/components/schemas/TranscriptSegment"
+    TranscriptSegment:
+      type: object
+      required:
+        - id
+        - start
+        - end
+        - text
+        - words
+      properties:
+        id:
+          type: integer
+        start:
+          type: number
+        end:
+          type: number
+        text:
+          type: string
+        words:
+          type: array
+          items:
+            $ref: "#/components/schemas/TranscriptWord"
+    TranscriptWord:
+      type: object
+      required:
+        - word
+        - start
+        - end
+      properties:
+        word:
+          type: string
+        start:
+          type: number
+        end:
+          type: number
+        probability:
+          type: ["number", "null"]
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
 

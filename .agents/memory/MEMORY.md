@@ -1,0 +1,1 @@
+- [Local media runtime](local-media-runtime.md) — discover FFmpeg and Faster-Whisper across package/workspace working directories with explicit overrides.
