@@ -8,6 +8,10 @@
 
 export * from './errorResponse';
 export * from './healthStatus';
+export * from './highlightAnalysis';
+export * from './highlightCandidate';
+export * from './highlightCandidateSignals';
+export * from './highlightCandidateUpdate';
 export * from './job';
 export * from './jobMedia';
 export * from './jobStatus';

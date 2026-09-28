@@ -17,6 +17,7 @@ export const JobStatus = {
   validating: 'validating',
   extracting_audio: 'extracting_audio',
   transcribing: 'transcribing',
+  analyzing_highlights: 'analyzing_highlights',
   completed: 'completed',
   failed: 'failed',
 } as const;
@@ -78,5 +79,41 @@ export interface Transcript {
 
 export interface ErrorResponse {
   error: string;
+}
+
+export type HighlightCandidateSignals = { [key: string]: unknown };
+
+export interface HighlightCandidate {
+  id: string;
+  jobId: string;
+  /** @minimum 1 */
+  rank: number;
+  /** @minimum 0 */
+  start: number;
+  /** @minimum 0 */
+  end: number;
+  /**
+     * @minimum 0
+     * @maximum 100
+     */
+  score: number;
+  text: string;
+  reasons: string[];
+  signals: HighlightCandidateSignals;
+  sourceSegmentIds: number[];
+  updatedAt: string;
+}
+
+export interface HighlightAnalysis {
+  jobId: string;
+  analyzedAt: string;
+  candidates: HighlightCandidate[];
+}
+
+export interface HighlightCandidateUpdate {
+  /** @minimum 0 */
+  start: number;
+  /** @minimum 0 */
+  end: number;
 }
 

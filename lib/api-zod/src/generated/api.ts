@@ -28,7 +28,7 @@ export const listJobsResponseProgressMax = 100;
 export const ListJobsResponseItem = zod.object({
   "id": zod.string().uuid(),
   "filename": zod.string(),
-  "status": zod.enum(['queued', 'validating', 'extracting_audio', 'transcribing', 'completed', 'failed']),
+  "status": zod.enum(['queued', 'validating', 'extracting_audio', 'transcribing', 'analyzing_highlights', 'completed', 'failed']),
   "progress": zod.number().int().min(listJobsResponseProgressMin).max(listJobsResponseProgressMax),
   "durationSeconds": zod.number().nullish(),
   "media": zod.record(zod.string(), zod.unknown()).nullish(),
@@ -59,7 +59,7 @@ export const createJobResponseProgressMax = 100;
 export const CreateJobResponse = zod.object({
   "id": zod.string().uuid(),
   "filename": zod.string(),
-  "status": zod.enum(['queued', 'validating', 'extracting_audio', 'transcribing', 'completed', 'failed']),
+  "status": zod.enum(['queued', 'validating', 'extracting_audio', 'transcribing', 'analyzing_highlights', 'completed', 'failed']),
   "progress": zod.number().int().min(createJobResponseProgressMin).max(createJobResponseProgressMax),
   "durationSeconds": zod.number().nullish(),
   "media": zod.record(zod.string(), zod.unknown()).nullish(),
@@ -85,7 +85,7 @@ export const getJobResponseProgressMax = 100;
 export const GetJobResponse = zod.object({
   "id": zod.string().uuid(),
   "filename": zod.string(),
-  "status": zod.enum(['queued', 'validating', 'extracting_audio', 'transcribing', 'completed', 'failed']),
+  "status": zod.enum(['queued', 'validating', 'extracting_audio', 'transcribing', 'analyzing_highlights', 'completed', 'failed']),
   "progress": zod.number().int().min(getJobResponseProgressMin).max(getJobResponseProgressMax),
   "durationSeconds": zod.number().nullish(),
   "media": zod.record(zod.string(), zod.unknown()).nullish(),
@@ -119,6 +119,122 @@ export const GetTranscriptResponse = zod.object({
   "probability": zod.number().nullish()
 }))
 }))
+})
+
+
+/**
+ * @summary Get persisted highlight candidates
+ */
+export const GetHighlightsParams = zod.object({
+  "jobId": zod.coerce.string().uuid()
+})
+
+
+export const getHighlightsResponseCandidatesItemStartMin = 0;
+
+export const getHighlightsResponseCandidatesItemEndMin = 0;
+
+export const getHighlightsResponseCandidatesItemScoreMin = 0;
+export const getHighlightsResponseCandidatesItemScoreMax = 100;
+
+
+
+export const GetHighlightsResponse = zod.object({
+  "jobId": zod.string().uuid(),
+  "analyzedAt": zod.coerce.date(),
+  "candidates": zod.array(zod.object({
+  "id": zod.string().uuid(),
+  "jobId": zod.string().uuid(),
+  "rank": zod.number().int().min(1),
+  "start": zod.number().min(getHighlightsResponseCandidatesItemStartMin),
+  "end": zod.number().min(getHighlightsResponseCandidatesItemEndMin),
+  "score": zod.number().int().min(getHighlightsResponseCandidatesItemScoreMin).max(getHighlightsResponseCandidatesItemScoreMax),
+  "text": zod.string(),
+  "reasons": zod.array(zod.string()),
+  "signals": zod.record(zod.string(), zod.unknown()),
+  "sourceSegmentIds": zod.array(zod.number().int()),
+  "updatedAt": zod.coerce.date()
+}))
+})
+
+
+/**
+ * @summary Analyze a completed transcript into ranked candidates
+ */
+export const AnalyzeHighlightsParams = zod.object({
+  "jobId": zod.coerce.string().uuid()
+})
+
+
+export const analyzeHighlightsResponseCandidatesItemStartMin = 0;
+
+export const analyzeHighlightsResponseCandidatesItemEndMin = 0;
+
+export const analyzeHighlightsResponseCandidatesItemScoreMin = 0;
+export const analyzeHighlightsResponseCandidatesItemScoreMax = 100;
+
+
+
+export const AnalyzeHighlightsResponse = zod.object({
+  "jobId": zod.string().uuid(),
+  "analyzedAt": zod.coerce.date(),
+  "candidates": zod.array(zod.object({
+  "id": zod.string().uuid(),
+  "jobId": zod.string().uuid(),
+  "rank": zod.number().int().min(1),
+  "start": zod.number().min(analyzeHighlightsResponseCandidatesItemStartMin),
+  "end": zod.number().min(analyzeHighlightsResponseCandidatesItemEndMin),
+  "score": zod.number().int().min(analyzeHighlightsResponseCandidatesItemScoreMin).max(analyzeHighlightsResponseCandidatesItemScoreMax),
+  "text": zod.string(),
+  "reasons": zod.array(zod.string()),
+  "signals": zod.record(zod.string(), zod.unknown()),
+  "sourceSegmentIds": zod.array(zod.number().int()),
+  "updatedAt": zod.coerce.date()
+}))
+})
+
+
+/**
+ * @summary Adjust a candidate range before rendering
+ */
+export const UpdateHighlightCandidateParams = zod.object({
+  "jobId": zod.coerce.string().uuid(),
+  "candidateId": zod.coerce.string().uuid()
+})
+
+export const updateHighlightCandidateBodyStartMin = 0;
+
+export const updateHighlightCandidateBodyEndMin = 0;
+
+
+
+export const UpdateHighlightCandidateBody = zod.object({
+  "start": zod.number().min(updateHighlightCandidateBodyStartMin),
+  "end": zod.number().min(updateHighlightCandidateBodyEndMin)
+})
+
+
+export const updateHighlightCandidateResponseStartMin = 0;
+
+export const updateHighlightCandidateResponseEndMin = 0;
+
+export const updateHighlightCandidateResponseScoreMin = 0;
+export const updateHighlightCandidateResponseScoreMax = 100;
+
+
+
+export const UpdateHighlightCandidateResponse = zod.object({
+  "id": zod.string().uuid(),
+  "jobId": zod.string().uuid(),
+  "rank": zod.number().int().min(1),
+  "start": zod.number().min(updateHighlightCandidateResponseStartMin),
+  "end": zod.number().min(updateHighlightCandidateResponseEndMin),
+  "score": zod.number().int().min(updateHighlightCandidateResponseScoreMin).max(updateHighlightCandidateResponseScoreMax),
+  "text": zod.string(),
+  "reasons": zod.array(zod.string()),
+  "signals": zod.record(zod.string(), zod.unknown()),
+  "sourceSegmentIds": zod.array(zod.number().int()),
+  "updatedAt": zod.coerce.date()
 })
 
 

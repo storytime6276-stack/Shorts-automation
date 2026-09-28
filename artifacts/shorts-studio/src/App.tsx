@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
-import { useCreateJob, useGetJob, useGetTranscript, useHealthCheck, useListJobs, getGetJobQueryKey, getGetTranscriptQueryKey, getListJobsQueryKey, type Job, type JobStatus, type TranscriptSegment, type TranscriptWord } from '@workspace/api-client-react';
-import { Activity, AlertCircle, AudioLines, Check, ChevronDown, Clock3, FileVideo, Film, HardDrive, Inbox, Languages, Loader2, LockKeyhole, MoreHorizontal, RefreshCw, RotateCcw, Sparkles, UploadCloud, Video, X } from 'lucide-react';
+import { useAnalyzeHighlights, useCreateJob, useGetHighlights, useGetJob, useGetTranscript, useHealthCheck, useListJobs, useUpdateHighlightCandidate, getGetHighlightsQueryKey, getGetJobQueryKey, getGetTranscriptQueryKey, getListJobsQueryKey, type HighlightAnalysis, type HighlightCandidate, type Job, type JobStatus, type TranscriptSegment, type TranscriptWord } from '@workspace/api-client-react';
+import { Activity, AlertCircle, AudioLines, Check, ChevronDown, Clock3, FileVideo, Film, HardDrive, Inbox, Languages, Loader2, LockKeyhole, MoreHorizontal, RefreshCw, RotateCcw, Save, Scissors, Sparkles, UploadCloud, Video, X } from 'lucide-react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
 import { TooltipProvider } from '@/components/ui/tooltip';
@@ -28,6 +28,7 @@ function titleForStatus(status: JobStatus) {
     validating: 'Validating media',
     extracting_audio: 'Extracting audio',
     transcribing: 'Writing transcript',
+    analyzing_highlights: 'Finding highlights',
     completed: 'Ready to review',
     failed: 'Processing stopped',
   };
@@ -40,6 +41,7 @@ function statusDetail(status: JobStatus) {
     validating: 'Checking the media stream and duration.',
     extracting_audio: 'Separating a clean local audio track.',
     transcribing: 'Matching words to their exact moments.',
+    analyzing_highlights: 'Ranking coherent clip candidates from the transcript.',
     completed: 'Everything is ready on this device.',
     failed: 'This file could not be processed.',
   };
@@ -111,8 +113,9 @@ function ProcessingRail({ job }: { job: Job }) {
     { key: 'validating', label: 'Validate media', icon: <Video size={15} /> },
     { key: 'extracting_audio', label: 'Extract audio', icon: <AudioLines size={15} /> },
     { key: 'transcribing', label: 'Word-level transcript', icon: <Languages size={15} /> },
+    { key: 'analyzing_highlights', label: 'Find highlights', icon: <Sparkles size={15} /> },
   ];
-  const order = ['queued', 'validating', 'extracting_audio', 'transcribing', 'completed'];
+  const order = ['queued', 'validating', 'extracting_audio', 'transcribing', 'analyzing_highlights', 'completed'];
   const current = order.indexOf(job.status);
   return (
     <div className="mt-7 rounded-2xl border border-border bg-card p-5 shadow-[0_12px_35px_hsl(var(--foreground)/.04)] animate-rise-in" data-testid="panel-processing-status">
@@ -121,7 +124,7 @@ function ProcessingRail({ job }: { job: Job }) {
         <span className="font-mono text-sm font-medium text-[hsl(var(--primary-foreground))]">{Math.round(job.progress)}%</span>
       </div>
       <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-[hsl(var(--primary))] transition-[width] duration-700 ease-out" style={{ width: `${job.progress}%` }} data-testid="progress-job" /></div>
-      <div className="mt-6 grid gap-3 sm:grid-cols-3">
+      <div className="mt-6 grid gap-3 sm:grid-cols-4">
         {steps.map((step, index) => {
           const stepIndex = order.indexOf(step.key);
           const complete = job.status === 'completed' || current > stepIndex;
@@ -153,6 +156,79 @@ function TranscriptViewer({ segmentList, language, duration }: { segmentList: Tr
   );
 }
 
+function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnalyzing, onAnalyze }: { jobId: string; duration?: number | null; analysis?: HighlightAnalysis; isLoading: boolean; isError: boolean; isAnalyzing: boolean; onAnalyze: () => void }) {
+  const queryClient = useQueryClient();
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [range, setRange] = useState({ start: '', end: '' });
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const updateCandidate = useUpdateHighlightCandidate();
+  const candidates = analysis?.candidates ?? [];
+  const selected = candidates.find((candidate) => candidate.id === selectedId) ?? candidates[0];
+
+  useEffect(() => {
+    if (!selected) {
+      setSelectedId(null);
+      return;
+    }
+    setSelectedId(selected.id);
+    setRange({ start: selected.start.toFixed(2), end: selected.end.toFixed(2) });
+  }, [analysis, selected]);
+
+  const saveRange = () => {
+    if (!selected) return;
+    const start = Number(range.start);
+    const end = Number(range.end);
+    if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start || (duration !== null && duration !== undefined && end > duration + 0.05)) {
+      setSaveError('Enter a valid range with start before end and end inside the video duration.');
+      return;
+    }
+    setSaveError(null);
+    updateCandidate.mutate({ jobId, candidateId: selected.id, data: { start, end } }, {
+      onSuccess: () => void queryClient.invalidateQueries({ queryKey: getGetHighlightsQueryKey(jobId) }),
+      onError: (error) => setSaveError(error instanceof Error ? error.message : 'Candidate range could not be saved.'),
+    });
+  };
+
+  return (
+    <section className="mt-7 overflow-hidden rounded-2xl border border-border bg-card shadow-[0_12px_35px_hsl(var(--foreground)/.04)] animate-rise-in" data-testid="panel-highlights">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border px-5 py-5">
+        <div>
+          <div className="flex items-center gap-2"><Scissors size={16} className="text-[hsl(var(--accent))]" /><h2 className="text-sm font-extrabold tracking-tight">Highlight candidates</h2></div>
+          <p className="mt-1 pl-6 text-xs leading-5 text-muted-foreground">Ranked from adjacent transcript ranges using deterministic local signals. Nothing is rendered yet.</p>
+        </div>
+        <button type="button" onClick={onAnalyze} disabled={isAnalyzing} data-testid="button-analyze-highlights" className="flex items-center gap-2 rounded-lg border border-[hsl(var(--primary)/.45)] bg-[hsl(var(--primary)/.1)] px-3 py-2 text-xs font-bold text-foreground transition-colors hover:bg-[hsl(var(--primary)/.18)] disabled:cursor-wait disabled:opacity-60">
+          {isAnalyzing ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
+          {candidates.length ? 'Re-analyze' : 'Analyze transcript'}
+        </button>
+      </div>
+      {isLoading || isAnalyzing ? <div className="space-y-3 p-5" data-testid="skeleton-highlights">{[1, 2, 3].map((item) => <div key={item} className="h-20 animate-pulse rounded-xl bg-muted" />)}</div> : isError && candidates.length === 0 ? <div className="px-5 py-10 text-center" data-testid="empty-highlights"><Sparkles size={22} className="mx-auto mb-3 text-[hsl(var(--accent))]" /><p className="text-sm font-bold">No analysis saved yet</p><p className="mx-auto mt-1 max-w-sm text-xs leading-5 text-muted-foreground">Run the local analyzer to find coherent ranges with hook, payoff, pacing, and dead-air signals.</p></div> : candidates.length === 0 ? <div className="px-5 py-10 text-center" data-testid="empty-highlights"><p className="text-sm font-bold">No strong ranges found</p><p className="mt-1 text-xs text-muted-foreground">Try re-analyzing after checking the transcript.</p></div> : (
+        <div className="grid gap-0 lg:grid-cols-[minmax(0,1.1fr)_minmax(260px,.8fr)]">
+          <div className="divide-y divide-border">
+            {candidates.map((candidate) => <HighlightCandidateRow key={candidate.id} candidate={candidate} selected={candidate.id === selected?.id} onSelect={() => { setSelectedId(candidate.id); setSaveError(null); }} />)}
+          </div>
+          {selected ? <div className="border-t border-border bg-muted/25 p-5 lg:border-l lg:border-t-0" data-testid="panel-highlight-editor">
+            <div className="flex items-center justify-between gap-3"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">Adjust range</p><span className="rounded-full bg-[hsl(var(--primary)/.15)] px-2 py-1 font-mono text-[11px] font-bold text-foreground">{selected.score}/100</span></div>
+            <p className="mt-3 text-sm font-semibold leading-6">{selected.text}</p>
+            <div className="mt-5 grid grid-cols-2 gap-3">
+              <label className="text-[10px] font-bold uppercase tracking-[.12em] text-muted-foreground">Start<input type="number" min="0" step="0.01" value={range.start} onChange={(event) => setRange((current) => ({ ...current, start: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-offset-background focus:ring-2 focus:ring-ring" data-testid="input-highlight-start" /></label>
+              <label className="text-[10px] font-bold uppercase tracking-[.12em] text-muted-foreground">End<input type="number" min="0" step="0.01" value={range.end} onChange={(event) => setRange((current) => ({ ...current, end: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-offset-background focus:ring-2 focus:ring-ring" data-testid="input-highlight-end" /></label>
+            </div>
+            <button type="button" onClick={saveRange} disabled={updateCandidate.isPending} data-testid="button-save-highlight-range" className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg bg-[hsl(var(--primary))] px-3 py-2.5 text-xs font-extrabold text-[hsl(var(--primary-foreground))] transition-opacity disabled:opacity-60">{updateCandidate.isPending ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Save range</button>
+            {saveError ? <p className="mt-3 text-xs leading-5 text-red-700 dark:text-red-300" data-testid="error-highlight-range">{saveError}</p> : null}
+            <div className="mt-5 border-t border-border pt-4"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">Why it ranked</p><ul className="mt-2 space-y-2">{selected.reasons.map((reason) => <li key={reason} className="flex gap-2 text-xs leading-5 text-muted-foreground"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-[hsl(var(--accent))]" />{reason}</li>)}</ul></div>
+          </div> : null}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function HighlightCandidateRow({ candidate, selected, onSelect }: { candidate: HighlightCandidate; selected: boolean; onSelect: () => void }) {
+  return <button type="button" onClick={onSelect} data-testid={`button-highlight-candidate-${candidate.rank}`} className={`block w-full px-5 py-4 text-left transition-colors hover:bg-muted/55 ${selected ? 'bg-[hsl(var(--primary)/.07)]' : ''}`}>
+    <div className="flex gap-3"><span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border bg-background font-mono text-[11px] font-bold">0{candidate.rank}</span><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="font-mono text-[10px] text-[hsl(var(--accent))]">{formatTime(candidate.start)} – {formatTime(candidate.end)}</span><span className="rounded-full bg-emerald-500/10 px-2 py-0.5 font-mono text-[10px] font-bold text-emerald-700 dark:text-emerald-400">{candidate.score} score</span></div><p className="mt-2 line-clamp-2 text-[13px] leading-5 text-foreground">{candidate.text}</p></div></div>
+  </button>;
+}
+
 function Home() {
   const queryClient = useQueryClient();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -165,6 +241,8 @@ function Home() {
   const jobQuery = useGetJob(activeId, { query: { enabled: Boolean(activeId), queryKey: getGetJobQueryKey(activeId), refetchInterval: (query) => { const data = query.state.data as Job | undefined; return data && runningStatuses.includes(data.status) ? 1400 : false; } } });
   const selectedJob = jobQuery.data ?? selectedFromList;
   const transcriptQuery = useGetTranscript(activeId, { query: { enabled: Boolean(activeId) && selectedJob?.status === 'completed', queryKey: getGetTranscriptQueryKey(activeId), retry: 1 } });
+  const highlightsQuery = useGetHighlights(activeId, { query: { enabled: Boolean(activeId) && selectedJob?.status === 'completed', queryKey: getGetHighlightsQueryKey(activeId), retry: false } });
+  const analyzeHighlights = useAnalyzeHighlights();
   const healthQuery = useHealthCheck({ query: { queryKey: ['/api/healthz'], staleTime: 30_000 } });
   const createJob = useCreateJob({ request: { headers: selectedFile ? { 'X-File-Name': selectedFile.name } : undefined } });
 
@@ -188,6 +266,12 @@ function Home() {
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: getListJobsQueryKey() });
     if (activeId) void queryClient.invalidateQueries({ queryKey: getGetJobQueryKey(activeId) });
+  };
+  const runHighlightAnalysis = () => {
+    if (!activeId) return;
+    analyzeHighlights.mutate({ jobId: activeId }, {
+      onSuccess: (analysis) => queryClient.setQueryData(getGetHighlightsQueryKey(activeId), analysis),
+    });
   };
   const displayJob = selectedJob;
   const hasJobs = jobs.length > 0;
@@ -221,7 +305,7 @@ function Home() {
                 </div>
                 <div className="rounded-2xl border border-border bg-card/75 p-5 backdrop-blur-sm"><div className="flex items-center justify-between"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-muted-foreground">Pipeline</p><span className="font-mono text-[10px] text-emerald-700 dark:text-emerald-400">on-device</span></div><div className="mt-6 space-y-0">{[['01', 'Validate', 'Video stream + duration'], ['02', 'Extract', 'Clean audio track'], ['03', 'Transcribe', 'Word-level timestamps']].map(([number, title, sub], index) => <div key={number} className="relative flex gap-3 pb-7 last:pb-0"><div className="relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[hsl(var(--primary)/.45)] bg-[hsl(var(--primary)/.1)] font-mono text-[10px] text-[hsl(var(--primary-foreground))]">{index === 2 ? <Sparkles size={13} className="text-[hsl(var(--primary))]" /> : number}</div>{index < 2 ? <span className="absolute left-[13px] top-7 h-full w-px bg-border" /> : null}<div><p className="text-sm font-bold">{title}</p><p className="mt-1 text-xs text-muted-foreground">{sub}</p></div></div>)}</div><div className="mt-7 border-t border-border pt-4 text-[11px] leading-5 text-muted-foreground">Nothing is uploaded to a third party. You can close the tab after processing and the session remains in your local workspace.</div></div>
               </div>
-              {displayJob ? <div className="mt-10 border-t border-border pt-8"><div className="flex flex-wrap items-end justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-[hsl(var(--accent))]">02 / Active session</p><h2 className="mt-2 max-w-xl truncate text-xl font-extrabold tracking-[-.03em] sm:text-2xl" data-testid="text-active-job">{displayJob.filename}</h2></div><div className="flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5"><StatusDot status={displayJob.status} /><span className="text-xs font-semibold">{titleForStatus(displayJob.status)}</span></div></div>{displayJob.status === 'failed' ? <div className="mt-5 flex items-start gap-3 rounded-2xl border border-red-500/25 bg-red-500/7 p-4 text-sm" data-testid="error-job"><AlertCircle className="mt-0.5 shrink-0 text-red-600" size={18} /><div><p className="font-bold text-red-800 dark:text-red-300">This job needs attention</p><p className="mt-1 text-xs leading-5 text-red-700/80 dark:text-red-300/80">{displayJob.error || 'The local processor returned an unknown error.'}</p><button type="button" onClick={() => { setSelectedFile(null); setUploadError(null); }} data-testid="button-dismiss-error" className="mt-3 flex items-center gap-1.5 text-xs font-bold text-red-800 dark:text-red-300"><RotateCcw size={13} /> Choose another file</button></div></div> : displayJob.status !== 'completed' ? <ProcessingRail job={displayJob} /> : transcriptQuery.isLoading ? <div className="mt-7 h-48 animate-pulse rounded-2xl bg-card" data-testid="skeleton-transcript" /> : transcriptQuery.isError ? <div className="mt-7 rounded-2xl border border-border bg-card p-8 text-center" data-testid="error-transcript"><AlertCircle size={22} className="mx-auto mb-2 text-[hsl(var(--accent))]" /><p className="text-sm font-bold">Transcript is not available yet</p><button type="button" onClick={() => void transcriptQuery.refetch()} data-testid="button-retry-transcript" className="mt-3 text-xs font-bold text-[hsl(var(--accent))]">Try again</button></div> : transcriptQuery.data ? <TranscriptViewer segmentList={transcriptQuery.data.segments} language={transcriptQuery.data.language} duration={transcriptQuery.data.durationSeconds} /> : null}</div> : <div className="mt-12 rounded-2xl border border-border bg-card/45 px-6 py-10 text-center"><div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-muted text-muted-foreground"><HardDrive size={20} /></div><p className="mt-4 text-sm font-bold" data-testid="empty-active-job">No session selected</p><p className="mt-1 text-xs text-muted-foreground">Upload a video above to start your first local processing run.</p></div>}
+              {displayJob ? <div className="mt-10 border-t border-border pt-8"><div className="flex flex-wrap items-end justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-[hsl(var(--accent))]">02 / Active session</p><h2 className="mt-2 max-w-xl truncate text-xl font-extrabold tracking-[-.03em] sm:text-2xl" data-testid="text-active-job">{displayJob.filename}</h2></div><div className="flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5"><StatusDot status={displayJob.status} /><span className="text-xs font-semibold">{titleForStatus(displayJob.status)}</span></div></div>{displayJob.status === 'failed' ? <div className="mt-5 flex items-start gap-3 rounded-2xl border border-red-500/25 bg-red-500/7 p-4 text-sm" data-testid="error-job"><AlertCircle className="mt-0.5 shrink-0 text-red-600" size={18} /><div><p className="font-bold text-red-800 dark:text-red-300">This job needs attention</p><p className="mt-1 text-xs leading-5 text-red-700/80 dark:text-red-300/80">{displayJob.error || 'The local processor returned an unknown error.'}</p><button type="button" onClick={() => { setSelectedFile(null); setUploadError(null); }} data-testid="button-dismiss-error" className="mt-3 flex items-center gap-1.5 text-xs font-bold text-red-800 dark:text-red-300"><RotateCcw size={13} /> Choose another file</button></div></div> : displayJob.status !== 'completed' ? <ProcessingRail job={displayJob} /> : transcriptQuery.isLoading ? <div className="mt-7 h-48 animate-pulse rounded-2xl bg-card" data-testid="skeleton-transcript" /> : transcriptQuery.isError ? <div className="mt-7 rounded-2xl border border-border bg-card p-8 text-center" data-testid="error-transcript"><AlertCircle size={22} className="mx-auto mb-2 text-[hsl(var(--accent))]" /><p className="text-sm font-bold">Transcript is not available yet</p><button type="button" onClick={() => void transcriptQuery.refetch()} data-testid="button-retry-transcript" className="mt-3 text-xs font-bold text-[hsl(var(--accent))]">Try again</button></div> : transcriptQuery.data ? <><TranscriptViewer segmentList={transcriptQuery.data.segments} language={transcriptQuery.data.language} duration={transcriptQuery.data.durationSeconds} /><HighlightPanel jobId={activeId} duration={transcriptQuery.data.durationSeconds} analysis={highlightsQuery.data} isLoading={highlightsQuery.isLoading} isError={highlightsQuery.isError} isAnalyzing={analyzeHighlights.isPending} onAnalyze={runHighlightAnalysis} /></> : null}</div> : <div className="mt-12 rounded-2xl border border-border bg-card/45 px-6 py-10 text-center"><div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-muted text-muted-foreground"><HardDrive size={20} /></div><p className="mt-4 text-sm font-bold" data-testid="empty-active-job">No session selected</p><p className="mt-1 text-xs text-muted-foreground">Upload a video above to start your first local processing run.</p></div>}
             </div>
           </div>
         </main>

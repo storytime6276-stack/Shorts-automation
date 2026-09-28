@@ -1,0 +1,48 @@
+{
+  "language": "en",
+  "durationSeconds": 40,
+  "segments": [
+    {
+      "id": 0,
+      "start": 0,
+      "end": 3.2,
+      "text": "Most people make this mistake when they start.",
+      "words": []
+    },
+    {
+      "id": 1,
+      "start": 3.35,
+      "end": 7.8,
+      "text": "The surprising truth is that the simple fix changes everything.",
+      "words": []
+    },
+    {
+      "id": 2,
+      "start": 7.95,
+      "end": 12.4,
+      "text": "Here is the key idea you can use today.",
+      "words": []
+    },
+    {
+      "id": 3,
+      "start": 20,
+      "end": 24.5,
+      "text": "Why does this work when the obvious approach fails?",
+      "words": []
+    },
+    {
+      "id": 4,
+      "start": 24.65,
+      "end": 30,
+      "text": "Because the useful part is to remove the extra steps.",
+      "words": []
+    },
+    {
+      "id": 5,
+      "start": 30.15,
+      "end": 35,
+      "text": "That is why the result feels faster and more reliable.",
+      "words": []
+    }
+  ]
+}

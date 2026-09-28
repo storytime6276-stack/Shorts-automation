@@ -12,6 +12,8 @@ tags:
     description: Health operations
   - name: jobs
     description: Local video processing jobs
+  - name: highlights
+    description: Deterministic transcript-driven highlight candidates
 paths:
   /healthz:
     get:
@@ -112,10 +114,89 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+  /jobs/{jobId}/highlights:
+    get:
+      operationId: getHighlights
+      tags: [highlights]
+      summary: Get persisted highlight candidates
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Highlight analysis and ranked candidates
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HighlightAnalysis"
+        "404":
+          description: Highlights are not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+    post:
+      operationId: analyzeHighlights
+      tags: [highlights]
+      summary: Analyze a completed transcript into ranked candidates
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: New persisted highlight analysis
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HighlightAnalysis"
+        "404":
+          description: Completed transcript is not available
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+  /jobs/{jobId}/highlights/{candidateId}:
+    patch:
+      operationId: updateHighlightCandidate
+      tags: [highlights]
+      summary: Adjust a candidate range before rendering
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+        - $ref: "#/components/parameters/CandidateId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HighlightCandidateUpdate"
+      responses:
+        "200":
+          description: Updated candidate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HighlightCandidate"
+        "400":
+          description: Invalid candidate range
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "404":
+          description: Candidate not found
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
 components:
   parameters:
     JobId:
       name: jobId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+    CandidateId:
+      name: candidateId
       in: path
       required: true
       schema:
@@ -146,7 +227,7 @@ components:
           type: string
         status:
           type: string
-          enum: [queued, validating, extracting_audio, transcribing, completed, failed]
+          enum: [queued, validating, extracting_audio, transcribing, analyzing_highlights, completed, failed]
         progress:
           type: integer
           minimum: 0
@@ -228,4 +309,83 @@ components:
       properties:
         error:
           type: string
+    HighlightAnalysis:
+      type: object
+      required:
+        - jobId
+        - analyzedAt
+        - candidates
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        analyzedAt:
+          type: string
+          format: date-time
+        candidates:
+          type: array
+          items:
+            $ref: "#/components/schemas/HighlightCandidate"
+    HighlightCandidate:
+      type: object
+      required:
+        - id
+        - jobId
+        - rank
+        - start
+        - end
+        - score
+        - text
+        - reasons
+        - signals
+        - sourceSegmentIds
+        - updatedAt
+      properties:
+        id:
+          type: string
+          format: uuid
+        jobId:
+          type: string
+          format: uuid
+        rank:
+          type: integer
+          minimum: 1
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        text:
+          type: string
+        reasons:
+          type: array
+          items:
+            type: string
+        signals:
+          type: object
+          additionalProperties: true
+        sourceSegmentIds:
+          type: array
+          items:
+            type: integer
+        updatedAt:
+          type: string
+          format: date-time
+    HighlightCandidateUpdate:
+      type: object
+      required:
+        - start
+        - end
+      properties:
+        start:
+          type: number
+          minimum: 0
+        end:
+          type: number
+          minimum: 0
 

@@ -14,6 +14,7 @@ export const JobStatus = {
   validating: 'validating',
   extracting_audio: 'extracting_audio',
   transcribing: 'transcribing',
+  analyzing_highlights: 'analyzing_highlights',
   completed: 'completed',
   failed: 'failed',
 } as const;

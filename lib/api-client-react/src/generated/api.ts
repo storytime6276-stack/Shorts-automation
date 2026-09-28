@@ -22,6 +22,9 @@ import type {
 import type {
   ErrorResponse,
   HealthStatus,
+  HighlightAnalysis,
+  HighlightCandidate,
+  HighlightCandidateUpdate,
   Job,
   Transcript
 } from './api.schemas';
@@ -450,4 +453,246 @@ export function useGetTranscript<TData = Awaited<ReturnType<typeof getTranscript
 
 
 
+
+export const getGetHighlightsUrl = (jobId: string,) => {
+
+
+
+
+  return `/api/jobs/${jobId}/highlights`
+}
+
+/**
+ * @summary Get persisted highlight candidates
+ */
+export const getHighlights = async (jobId: string, options?: Parameters<typeof customFetch>[1]): Promise<HighlightAnalysis> => {
+
+  return customFetch<HighlightAnalysis>(getGetHighlightsUrl(jobId),
+  {
+    ...options,
+    method: 'GET'
+
+
+  }
+);}
+
+
+
+
+
+export const getGetHighlightsQueryKey = (jobId: string,) => {
+    return [
+    `/api/jobs/${jobId}/highlights`
+    ] as const;
+    }
+
+
+export const getGetHighlightsQueryOptions = <TData = Awaited<ReturnType<typeof getHighlights>>, TError = ErrorType<ErrorResponse>>(jobId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getHighlights>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetHighlightsQueryKey(jobId);
+
+
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getHighlights>>> = ({ signal }) => getHighlights(jobId, { signal, ...requestOptions });
+
+
+
+
+
+   return  { queryKey, queryFn, enabled: jobId !== null && jobId !== undefined, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getHighlights>>, TError, TData> & { queryKey: QueryKey }
+}
+
+export type GetHighlightsQueryResult = NonNullable<Awaited<ReturnType<typeof getHighlights>>>
+export type GetHighlightsQueryError = ErrorType<ErrorResponse>
+
+
+/**
+ * @summary Get persisted highlight candidates
+ */
+
+export function useGetHighlights<TData = Awaited<ReturnType<typeof getHighlights>>, TError = ErrorType<ErrorResponse>>(
+ jobId: string, options?: { query?:UseQueryOptions<Awaited<ReturnType<typeof getHighlights>>, TError, TData>, request?: SecondParameter<typeof customFetch>}
+
+ ):  UseQueryResult<TData, TError> & { queryKey: QueryKey } {
+
+  const queryOptions = getGetHighlightsQueryOptions(jobId,options)
+
+  const query = useQuery(queryOptions) as  UseQueryResult<TData, TError> & { queryKey: QueryKey };
+
+  return withQueryKey(query, queryOptions.queryKey);
+}
+
+
+
+
+
+
+
+export const getAnalyzeHighlightsUrl = (jobId: string,) => {
+
+
+
+
+  return `/api/jobs/${jobId}/highlights`
+}
+
+/**
+ * @summary Analyze a completed transcript into ranked candidates
+ */
+export const analyzeHighlights = async (jobId: string, options?: Parameters<typeof customFetch>[1]): Promise<HighlightAnalysis> => {
+
+  return customFetch<HighlightAnalysis>(getAnalyzeHighlightsUrl(jobId),
+  {
+    ...options,
+    method: 'POST'
+
+
+  }
+);}
+
+
+
+
+
+export const getAnalyzeHighlightsMutationKey = () => ['analyzeHighlights'] as const;
+
+export const getAnalyzeHighlightsMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof analyzeHighlights>>, TError,AnalyzeHighlightsMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof analyzeHighlights>>, TError,AnalyzeHighlightsMutationVariables, TContext> => {
+
+const mutationKey = getAnalyzeHighlightsMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof analyzeHighlights>>, AnalyzeHighlightsMutationVariables> = (props) => {
+          const {jobId} = props ?? {};
+
+          return  analyzeHighlights(jobId,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AnalyzeHighlightsMutationResult = NonNullable<Awaited<ReturnType<typeof analyzeHighlights>>>
+
+    export type AnalyzeHighlightsMutationError = ErrorType<ErrorResponse>
+    export type AnalyzeHighlightsMutationVariables = {jobId: string}
+
+    /**
+ * @summary Analyze a completed transcript into ranked candidates
+ */
+export const useAnalyzeHighlights = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof analyzeHighlights>>, TError,AnalyzeHighlightsMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof analyzeHighlights>>,
+        TError,
+        AnalyzeHighlightsMutationVariables,
+        TContext
+      > => {
+      return useMutation(getAnalyzeHighlightsMutationOptions(options));
+    }
+
+export const getUpdateHighlightCandidateUrl = (jobId: string,
+    candidateId: string,) => {
+
+
+
+
+  return `/api/jobs/${jobId}/highlights/${candidateId}`
+}
+
+/**
+ * @summary Adjust a candidate range before rendering
+ */
+export const updateHighlightCandidate = async (jobId: string,
+    candidateId: string,
+    highlightCandidateUpdate: HighlightCandidateUpdate, options?: Parameters<typeof customFetch>[1]): Promise<HighlightCandidate> => {
+
+    const getHeaders = (h?: NonNullable<RequestInit['headers']>): Record<string, string | readonly string[]> => {
+    if (!h) return {};
+    if (h instanceof Headers) return Object.fromEntries(h.entries());
+    if (Symbol.iterator in h) {
+      return Object.fromEntries(
+        Array.from(h as Iterable<Iterable<string>>, (entry) => Array.from(entry) as [string, string]),
+      );
+    }
+    const headers: Record<string, string | readonly string[]> = {};
+    for (const [name, value] of Object.entries<string | readonly string[] | undefined>(h)) {
+      if (value !== undefined) headers[name] = value;
+    }
+    return headers;
+  };
+return customFetch<HighlightCandidate>(getUpdateHighlightCandidateUrl(jobId,candidateId),
+  {
+    ...options,
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...getHeaders(options?.headers) },
+    body: JSON.stringify(highlightCandidateUpdate)
+  }
+);}
+
+
+
+
+
+export const getUpdateHighlightCandidateMutationKey = () => ['updateHighlightCandidate'] as const;
+
+export const getUpdateHighlightCandidateMutationOptions = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateHighlightCandidate>>, TError,UpdateHighlightCandidateMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+): UseMutationOptions<Awaited<ReturnType<typeof updateHighlightCandidate>>, TError,UpdateHighlightCandidateMutationVariables, TContext> => {
+
+const mutationKey = getUpdateHighlightCandidateMutationKey();
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof updateHighlightCandidate>>, UpdateHighlightCandidateMutationVariables> = (props) => {
+          const {jobId,candidateId,data} = props ?? {};
+
+          return  updateHighlightCandidate(jobId,candidateId,data,requestOptions)
+        }
+
+
+
+
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type UpdateHighlightCandidateMutationResult = NonNullable<Awaited<ReturnType<typeof updateHighlightCandidate>>>
+    export type UpdateHighlightCandidateMutationBody = BodyType<HighlightCandidateUpdate>
+    export type UpdateHighlightCandidateMutationError = ErrorType<ErrorResponse>
+    export type UpdateHighlightCandidateMutationVariables = {jobId: string;candidateId: string;data: BodyType<HighlightCandidateUpdate>}
+
+    /**
+ * @summary Adjust a candidate range before rendering
+ */
+export const useUpdateHighlightCandidate = <TError = ErrorType<ErrorResponse>,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof updateHighlightCandidate>>, TError,UpdateHighlightCandidateMutationVariables, TContext>, request?: SecondParameter<typeof customFetch>}
+ ): UseMutationResult<
+        Awaited<ReturnType<typeof updateHighlightCandidate>>,
+        TError,
+        UpdateHighlightCandidateMutationVariables,
+        TContext
+      > => {
+      return useMutation(getUpdateHighlightCandidateMutationOptions(options));
+    }
 

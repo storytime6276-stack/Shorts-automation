@@ -10,12 +10,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Request } from "express";
 import { logger } from "../lib/logger";
+import { analyzeAndSave } from "./highlights";
 
 export type JobStatus =
   | "queued"
   | "validating"
   | "extracting_audio"
   | "transcribing"
+  | "analyzing_highlights"
   | "completed"
   | "failed";
 
@@ -53,6 +55,7 @@ export type JobRecord = {
     input: string;
     audio: string;
     transcript: string;
+    highlights: string;
   };
 };
 
@@ -319,6 +322,15 @@ async function processJob(job: JobRecord) {
       (count, segment) => count + segment.words.length,
       0,
     );
+    await setJob(job, {
+      status: "analyzing_highlights",
+      progress: 90,
+    });
+    const analysis = await analyzeAndSave(
+      job.id,
+      transcript,
+      job.paths.highlights,
+    );
 
     await setJob(job, {
       status: "completed",
@@ -328,6 +340,8 @@ async function processJob(job: JobRecord) {
         segmentCount: transcript.segments.length,
         wordCount,
         path: "transcript.json",
+        highlightCount: analysis.candidates.length,
+        highlightsPath: "highlights.json",
       },
     });
   } catch (error) {
@@ -359,6 +373,7 @@ export class JobStore {
           try {
             const metadataPath = path.join(workspaceRoot, entry.name, "job.json");
             const job = JSON.parse(await fs.readFile(metadataPath, "utf8")) as JobRecord;
+            job.paths.highlights ??= path.join(job.paths.directory, "highlights.json");
             if (job.status !== "completed" && job.status !== "failed") {
               job.status = "failed";
               job.progress = 100;
@@ -395,6 +410,7 @@ export class JobStore {
     const input = path.join(directory, "input", safeFilename(filename));
     const audio = path.join(directory, "audio.wav");
     const transcript = path.join(directory, "transcript.json");
+    const highlights = path.join(directory, "highlights.json");
     const job: JobRecord = {
       id,
       filename: safeFilename(filename),
@@ -406,7 +422,7 @@ export class JobStore {
       error: null,
       createdAt: now(),
       updatedAt: now(),
-      paths: { directory, input, audio, transcript },
+      paths: { directory, input, audio, transcript, highlights },
     };
 
     await fs.mkdir(path.dirname(input), { recursive: true });
