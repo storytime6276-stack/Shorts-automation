@@ -86,6 +86,7 @@ function findPythonCommand() {
   const relativeCandidates =
     process.platform === "win32"
       ? [
+          path.join("..", "..", ".venv", "Scripts", "python.exe"),
           path.join(".pythonlibs", "Scripts", "python.exe"),
           path.join("..", "..", ".pythonlibs", "Scripts", "python.exe"),
         ]
