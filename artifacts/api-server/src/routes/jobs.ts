@@ -20,6 +20,9 @@ import {
   readAnalysis,
   updateCandidate,
 } from "../media/highlights";
+import { clipFilePath, createClip, readClips } from "../media/clips";
+import { promises as fs } from "node:fs";
+import path from "node:path";
 
 const router: IRouter = Router();
 
@@ -172,6 +175,69 @@ router.patch("/jobs/:jobId/highlights/:candidateId", async (req, res) => {
     res.status(400).json({
       error: error instanceof Error ? error.message : "Candidate update failed.",
     });
+  }
+});
+
+router.post("/jobs/:jobId/clips", async (req, res) => {
+  await jobStore.ready;
+  const job = jobStore.getRecord(req.params.jobId);
+  const candidateId = req.body?.candidateId;
+  if (!job || job.status !== "completed") {
+    res.status(404).json({ error: "Completed job not found." });
+    return;
+  }
+  if (typeof candidateId !== "string" || !candidateId) {
+    res.status(400).json({ error: "candidateId is required." });
+    return;
+  }
+  try {
+    const analysis = await readAnalysis(job.paths.highlights);
+    const candidate = analysis.candidates.find((item) => item.id === candidateId);
+    if (!candidate) {
+      res.status(404).json({ error: "Highlight candidate not found." });
+      return;
+    }
+    const clip = await createClip(job.id, job.paths.directory, job.paths.input, candidate, job.durationSeconds);
+    res.status(202).json(clip);
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : "Clip generation could not start." });
+  }
+});
+
+router.get("/jobs/:jobId/clips", async (req, res) => {
+  await jobStore.ready;
+  const job = jobStore.getRecord(req.params.jobId);
+  if (!job) {
+    res.status(404).json({ error: "Job not found." });
+    return;
+  }
+  try {
+    res.json({ clips: await readClips(job.paths.directory) });
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : "Clip metadata could not be read." });
+  }
+});
+
+router.get("/jobs/:jobId/clips/:clipId/:variant", async (req, res) => {
+  await jobStore.ready;
+  const job = jobStore.getRecord(req.params.jobId);
+  const variant = req.params.variant;
+  if (!job || (variant !== "preview" && variant !== "vertical")) {
+    res.status(404).json({ error: "Clip file not found." });
+    return;
+  }
+  try {
+    const clips = await readClips(job.paths.directory);
+    const clip = clips.find((item) => item.id === req.params.clipId && item.status === "ready");
+    if (!clip) {
+      res.status(404).json({ error: "Generated clip is not ready." });
+      return;
+    }
+    const file = clipFilePath(job.paths.directory, clip.id, variant);
+    await fs.access(file);
+    res.type("video/mp4").sendFile(path.resolve(file));
+  } catch (error) {
+    res.status(404).json({ error: error instanceof Error ? error.message : "Generated clip file is unavailable." });
   }
 });
 

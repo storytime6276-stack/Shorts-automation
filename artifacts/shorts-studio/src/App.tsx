@@ -157,10 +157,28 @@ function TranscriptViewer({ segmentList, language, duration }: { segmentList: Tr
 }
 
 function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnalyzing, onAnalyze }: { jobId: string; duration?: number | null; analysis?: HighlightAnalysis; isLoading: boolean; isError: boolean; isAnalyzing: boolean; onAnalyze: () => void }) {
+  const scoreComponents = [
+    { label: 'Hook', key: 'hook' },
+    { label: 'Curiosity', key: 'curiosity' },
+    { label: 'Emotional interest', key: 'emotionalInterest' },
+    { label: 'Argument turn', key: 'argumentativeTurn' },
+    { label: 'Payoff', key: 'payoff' },
+    { label: 'Completeness', key: 'completeness' },
+    { label: 'Self-contained', key: 'selfContained' },
+    { label: 'Length fit', key: 'durationFit' },
+    { label: 'Keyword density', key: 'keywordDensity' },
+    { label: 'Pacing', key: 'pacing' },
+    { label: 'Dead air · penalty', key: 'deadAir' },
+    { label: 'Repetition · penalty', key: 'repetition' },
+    { label: 'Missing context · penalty', key: 'contextDependency' },
+  ] as const;
   const queryClient = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [range, setRange] = useState({ start: '', end: '' });
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [clip, setClip] = useState<{ id: string; status: string; progress: number; error: string | null; previewUrl: string | null; verticalUrl: string | null; width: number | null; height: number | null } | null>(null);
+  const [clipError, setClipError] = useState<string | null>(null);
+  const [creatingClip, setCreatingClip] = useState(false);
   const updateCandidate = useUpdateHighlightCandidate();
   const candidates = analysis?.candidates ?? [];
   const selected = candidates.find((candidate) => candidate.id === selectedId) ?? candidates[0];
@@ -189,6 +207,37 @@ function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnaly
     });
   };
 
+  useEffect(() => {
+    if (!clip || !['queued', 'extracting', 'preparing_vertical'].includes(clip.status)) return;
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      void fetch(`/api/jobs/${jobId}/clips`).then((response) => response.json()).then((data) => {
+        if (!cancelled) {
+          const latest = (data.clips ?? []).find((item: typeof clip) => item.id === clip.id);
+          if (latest) setClip(latest);
+        }
+      }).catch(() => { if (!cancelled) setClipError('Clip progress could not be refreshed.'); });
+    }, 900);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [clip?.id, clip?.status, jobId]);
+
+  const generateClip = async () => {
+    if (!selected) return;
+    setClipError(null);
+    setClip(null);
+    setCreatingClip(true);
+    try {
+      const response = await fetch(`/api/jobs/${jobId}/clips`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidateId: selected.id }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || 'Clip generation could not start.');
+      setClip(result);
+    } catch (error) {
+      setClipError(error instanceof Error ? error.message : 'Clip generation could not start.');
+    } finally {
+      setCreatingClip(false);
+    }
+  };
+
   return (
     <section className="mt-7 overflow-hidden rounded-2xl border border-border bg-card shadow-[0_12px_35px_hsl(var(--foreground)/.04)] animate-rise-in" data-testid="panel-highlights">
       <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border px-5 py-5">
@@ -204,17 +253,27 @@ function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnaly
       {isLoading || isAnalyzing ? <div className="space-y-3 p-5" data-testid="skeleton-highlights">{[1, 2, 3].map((item) => <div key={item} className="h-20 animate-pulse rounded-xl bg-muted" />)}</div> : isError && candidates.length === 0 ? <div className="px-5 py-10 text-center" data-testid="empty-highlights"><Sparkles size={22} className="mx-auto mb-3 text-[hsl(var(--accent))]" /><p className="text-sm font-bold">No analysis saved yet</p><p className="mx-auto mt-1 max-w-sm text-xs leading-5 text-muted-foreground">Run the local analyzer to find coherent ranges with hook, payoff, pacing, and dead-air signals.</p></div> : candidates.length === 0 ? <div className="px-5 py-10 text-center" data-testid="empty-highlights"><p className="text-sm font-bold">No strong ranges found</p><p className="mt-1 text-xs text-muted-foreground">Try re-analyzing after checking the transcript.</p></div> : (
         <div className="grid gap-0 lg:grid-cols-[minmax(0,1.1fr)_minmax(260px,.8fr)]">
           <div className="divide-y divide-border">
-            {candidates.map((candidate) => <HighlightCandidateRow key={candidate.id} candidate={candidate} selected={candidate.id === selected?.id} onSelect={() => { setSelectedId(candidate.id); setSaveError(null); }} />)}
+            {candidates.map((candidate) => <HighlightCandidateRow key={candidate.id} candidate={candidate} selected={candidate.id === selected?.id} onSelect={() => { setSelectedId(candidate.id); setSaveError(null); setClip(null); setClipError(null); }} />)}
           </div>
           {selected ? <div className="border-t border-border bg-muted/25 p-5 lg:border-l lg:border-t-0" data-testid="panel-highlight-editor">
             <div className="flex items-center justify-between gap-3"><p className="font-mono text-[10px] uppercase tracking-[.16em] text-muted-foreground">Adjust range</p><span className="rounded-full bg-[hsl(var(--primary)/.15)] px-2 py-1 font-mono text-[11px] font-bold text-foreground">{selected.score}/100</span></div>
             <p className="mt-3 text-sm font-semibold leading-6">{selected.text}</p>
+            <div className="mt-4 rounded-xl border border-border bg-background/70 p-3" data-testid="highlight-score-components"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">Score components · 0–100</p><div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-2 sm:grid-cols-3">{scoreComponents.map(({ label, key }) => { const value = selected.signals?.[key]; return <div key={key} className="flex items-center justify-between gap-2 text-[10px] text-muted-foreground"><span>{label}</span><span className="font-mono font-bold text-foreground">{typeof value === 'number' ? Math.round(value * 100) : '—'}</span></div>; })}</div></div>
             <div className="mt-5 grid grid-cols-2 gap-3">
               <label className="text-[10px] font-bold uppercase tracking-[.12em] text-muted-foreground">Start<input type="number" min="0" step="0.01" value={range.start} onChange={(event) => setRange((current) => ({ ...current, start: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-offset-background focus:ring-2 focus:ring-ring" data-testid="input-highlight-start" /></label>
               <label className="text-[10px] font-bold uppercase tracking-[.12em] text-muted-foreground">End<input type="number" min="0" step="0.01" value={range.end} onChange={(event) => setRange((current) => ({ ...current, end: event.target.value }))} className="mt-1.5 w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-offset-background focus:ring-2 focus:ring-ring" data-testid="input-highlight-end" /></label>
             </div>
             <button type="button" onClick={saveRange} disabled={updateCandidate.isPending} data-testid="button-save-highlight-range" className="mt-4 flex w-full items-center justify-center gap-2 rounded-lg bg-[hsl(var(--primary))] px-3 py-2.5 text-xs font-extrabold text-[hsl(var(--primary-foreground))] transition-opacity disabled:opacity-60">{updateCandidate.isPending ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />} Save range</button>
             {saveError ? <p className="mt-3 text-xs leading-5 text-red-700 dark:text-red-300" data-testid="error-highlight-range">{saveError}</p> : null}
+            <div className="mt-5 border-t border-border pt-4">
+              <p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">Clip Studio</p>
+              <button type="button" onClick={() => void generateClip()} disabled={creatingClip || updateCandidate.isPending || Number(range.start) !== selected.start || Number(range.end) !== selected.end} className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-[hsl(var(--primary)/.45)] bg-[hsl(var(--primary)/.1)] px-3 py-2.5 text-xs font-extrabold hover:bg-[hsl(var(--primary)/.18)] disabled:cursor-not-allowed disabled:opacity-55" data-testid="button-generate-clip">
+                {creatingClip ? <Loader2 size={14} className="animate-spin" /> : <Film size={14} />} Generate 9:16 clip
+              </button>
+              {(Number(range.start) !== selected.start || Number(range.end) !== selected.end) ? <p className="mt-2 text-[10px] leading-4 text-muted-foreground">Save the adjusted range before generating a clip.</p> : null}
+              {clip ? <div className="mt-3" data-testid="clip-generation-status"><div className="flex items-center justify-between text-xs"><span className="font-semibold">{clip.status === 'queued' ? 'Queued' : clip.status === 'extracting' ? 'Extracting source segment' : clip.status === 'preparing_vertical' ? 'Preparing vertical crop' : clip.status === 'ready' ? `Ready · ${clip.width}×${clip.height}` : 'Failed'}</span><span className="font-mono text-muted-foreground">{clip.progress}%</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-[hsl(var(--primary))] transition-all" style={{ width: `${clip.progress}%` }} /></div>{clip.status === 'ready' && clip.verticalUrl ? <video className="mt-3 max-h-80 w-full rounded-lg bg-black" controls playsInline src={clip.verticalUrl} data-testid="video-generated-clip" /> : null}{clip.status === 'failed' && clip.error ? <p className="mt-2 text-xs leading-5 text-red-700 dark:text-red-300">{clip.error}</p> : null}</div> : null}
+              {clipError ? <p className="mt-2 text-xs leading-5 text-red-700 dark:text-red-300" data-testid="error-clip-generation">{clipError}</p> : null}
+            </div>
             <div className="mt-5 border-t border-border pt-4"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">Why it ranked</p><ul className="mt-2 space-y-2">{selected.reasons.map((reason) => <li key={reason} className="flex gap-2 text-xs leading-5 text-muted-foreground"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-[hsl(var(--accent))]" />{reason}</li>)}</ul></div>
           </div> : null}
         </div>
