@@ -176,9 +176,10 @@ function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnaly
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [range, setRange] = useState({ start: '', end: '' });
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [clip, setClip] = useState<{ id: string; status: string; progress: number; error: string | null; previewUrl: string | null; verticalUrl: string | null; width: number | null; height: number | null } | null>(null);
+  const [clip, setClip] = useState<{ id: string; status: string; progress: number; error: string | null; previewUrl: string | null; verticalUrl: string | null; finalUrl: string | null; width: number | null; height: number | null; captionsEnabled: boolean; captionStatus: string; captionCueCount: number; captionError: string | null } | null>(null);
   const [clipError, setClipError] = useState<string | null>(null);
   const [creatingClip, setCreatingClip] = useState(false);
+  const [captionsEnabled, setCaptionsEnabled] = useState(true);
   const updateCandidate = useUpdateHighlightCandidate();
   const candidates = analysis?.candidates ?? [];
   const selected = candidates.find((candidate) => candidate.id === selectedId) ?? candidates[0];
@@ -208,7 +209,7 @@ function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnaly
   };
 
   useEffect(() => {
-    if (!clip || !['queued', 'extracting', 'preparing_vertical'].includes(clip.status)) return;
+    if (!clip || !['queued', 'extracting', 'preparing_vertical', 'rendering_captions'].includes(clip.status)) return;
     let cancelled = false;
     const timer = window.setInterval(() => {
       void fetch(`/api/jobs/${jobId}/clips`).then((response) => response.json()).then((data) => {
@@ -227,7 +228,7 @@ function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnaly
     setClip(null);
     setCreatingClip(true);
     try {
-      const response = await fetch(`/api/jobs/${jobId}/clips`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidateId: selected.id }) });
+      const response = await fetch(`/api/jobs/${jobId}/clips`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ candidateId: selected.id, captionsEnabled }) });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || 'Clip generation could not start.');
       setClip(result);
@@ -267,11 +268,12 @@ function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnaly
             {saveError ? <p className="mt-3 text-xs leading-5 text-red-700 dark:text-red-300" data-testid="error-highlight-range">{saveError}</p> : null}
             <div className="mt-5 border-t border-border pt-4">
               <p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">Clip Studio</p>
+              <label className="mt-3 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" checked={captionsEnabled} onChange={(event) => setCaptionsEnabled(event.target.checked)} className="accent-[hsl(var(--primary))]" data-testid="toggle-clip-captions" /><span>Burn in synchronized transcript captions</span></label>
               <button type="button" onClick={() => void generateClip()} disabled={creatingClip || updateCandidate.isPending || Number(range.start) !== selected.start || Number(range.end) !== selected.end} className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg border border-[hsl(var(--primary)/.45)] bg-[hsl(var(--primary)/.1)] px-3 py-2.5 text-xs font-extrabold hover:bg-[hsl(var(--primary)/.18)] disabled:cursor-not-allowed disabled:opacity-55" data-testid="button-generate-clip">
                 {creatingClip ? <Loader2 size={14} className="animate-spin" /> : <Film size={14} />} Generate 9:16 clip
               </button>
               {(Number(range.start) !== selected.start || Number(range.end) !== selected.end) ? <p className="mt-2 text-[10px] leading-4 text-muted-foreground">Save the adjusted range before generating a clip.</p> : null}
-              {clip ? <div className="mt-3" data-testid="clip-generation-status"><div className="flex items-center justify-between text-xs"><span className="font-semibold">{clip.status === 'queued' ? 'Queued' : clip.status === 'extracting' ? 'Extracting source segment' : clip.status === 'preparing_vertical' ? 'Preparing vertical crop' : clip.status === 'ready' ? `Ready · ${clip.width}×${clip.height}` : 'Failed'}</span><span className="font-mono text-muted-foreground">{clip.progress}%</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-[hsl(var(--primary))] transition-all" style={{ width: `${clip.progress}%` }} /></div>{clip.status === 'ready' && clip.verticalUrl ? <video className="mt-3 max-h-80 w-full rounded-lg bg-black" controls playsInline src={clip.verticalUrl} data-testid="video-generated-clip" /> : null}{clip.status === 'failed' && clip.error ? <p className="mt-2 text-xs leading-5 text-red-700 dark:text-red-300">{clip.error}</p> : null}</div> : null}
+              {clip ? <div className="mt-3" data-testid="clip-generation-status"><div className="flex items-center justify-between text-xs"><span className="font-semibold">{clip.status === 'queued' ? 'Queued' : clip.status === 'extracting' ? 'Extracting source segment' : clip.status === 'preparing_vertical' ? 'Preparing vertical crop' : clip.status === 'rendering_captions' ? 'Burning in captions' : clip.status === 'ready' ? `Ready · ${clip.width}×${clip.height}` : 'Failed'}</span><span className="font-mono text-muted-foreground">{clip.progress}%</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-[hsl(var(--primary))] transition-all" style={{ width: `${clip.progress}%` }} /></div>{clip.status === 'ready' && (clip.finalUrl || clip.verticalUrl) ? <><p className="mt-2 text-[10px] text-muted-foreground">{clip.captionStatus === 'ready' ? `${clip.captionCueCount} synchronized caption cues burned in.` : clip.captionStatus === 'unavailable' ? (clip.captionError || 'Transcript captions are unavailable for this range.') : clip.captionStatus === 'not_requested' ? 'Captions disabled.' : 'Previously generated clip.'}</p><video className="mt-3 max-h-80 w-full rounded-lg bg-black" controls playsInline src={clip.finalUrl || clip.verticalUrl || undefined} data-testid="video-generated-clip" /></> : null}{clip.status === 'failed' && clip.error ? <p className="mt-2 text-xs leading-5 text-red-700 dark:text-red-300">{clip.error}</p> : null}{clip.captionStatus === 'failed' && clip.captionError ? <p className="mt-2 text-xs leading-5 text-red-700 dark:text-red-300">Caption rendering failed: {clip.captionError}</p> : null}</div> : null}
               {clipError ? <p className="mt-2 text-xs leading-5 text-red-700 dark:text-red-300" data-testid="error-clip-generation">{clipError}</p> : null}
             </div>
             <div className="mt-5 border-t border-border pt-4"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">Why it ranked</p><ul className="mt-2 space-y-2">{selected.reasons.map((reason) => <li key={reason} className="flex gap-2 text-xs leading-5 text-muted-foreground"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-[hsl(var(--accent))]" />{reason}</li>)}</ul></div>

@@ -8,7 +8,7 @@
     "build": "node ./build.mjs",
     "start": "node --enable-source-maps ./dist/index.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test src/media/highlights.test.ts src/media/clips.test.ts"
+    "test": "tsx --test src/media/highlights.test.ts src/media/clips.test.ts src/media/captions.test.ts"
   },
   "dependencies": {
     "@workspace/api-zod": "workspace:*",

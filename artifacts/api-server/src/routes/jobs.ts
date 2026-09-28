@@ -23,6 +23,7 @@ import {
 import { clipFilePath, createClip, readClips } from "../media/clips";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import type { Transcript } from "../media/pipeline";
 
 const router: IRouter = Router();
 
@@ -190,6 +191,10 @@ router.post("/jobs/:jobId/clips", async (req, res) => {
     res.status(400).json({ error: "candidateId is required." });
     return;
   }
+  if (req.body?.captionsEnabled !== undefined && typeof req.body.captionsEnabled !== "boolean") {
+    res.status(400).json({ error: "captionsEnabled must be a boolean." });
+    return;
+  }
   try {
     const analysis = await readAnalysis(job.paths.highlights);
     const candidate = analysis.candidates.find((item) => item.id === candidateId);
@@ -197,7 +202,8 @@ router.post("/jobs/:jobId/clips", async (req, res) => {
       res.status(404).json({ error: "Highlight candidate not found." });
       return;
     }
-    const clip = await createClip(job.id, job.paths.directory, job.paths.input, candidate, job.durationSeconds);
+    const transcript = JSON.parse(await fs.readFile(job.paths.transcript, "utf8")) as Transcript;
+    const clip = await createClip(job.id, job.paths.directory, job.paths.input, candidate, job.durationSeconds, transcript, req.body?.captionsEnabled ?? true);
     res.status(202).json(clip);
   } catch (error) {
     res.status(400).json({ error: error instanceof Error ? error.message : "Clip generation could not start." });
@@ -222,7 +228,7 @@ router.get("/jobs/:jobId/clips/:clipId/:variant", async (req, res) => {
   await jobStore.ready;
   const job = jobStore.getRecord(req.params.jobId);
   const variant = req.params.variant;
-  if (!job || (variant !== "preview" && variant !== "vertical")) {
+  if (!job || (variant !== "preview" && variant !== "vertical" && variant !== "final")) {
     res.status(404).json({ error: "Clip file not found." });
     return;
   }
