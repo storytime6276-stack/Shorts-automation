@@ -101,6 +101,7 @@ function findPythonCommand() {
 }
 
 const pythonCommand = findPythonCommand();
+export function getLocalPythonCommand() { return pythonCommand; }
 const ffprobeCommand = process.env.FFPROBE_BIN ?? "ffprobe";
 const ffmpegCommand = process.env.FFMPEG_BIN ?? "ffmpeg";
 const whisperModel = process.env.WHISPER_MODEL ?? "small";

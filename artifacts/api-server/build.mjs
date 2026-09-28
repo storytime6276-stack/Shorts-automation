@@ -123,6 +123,10 @@ globalThis.__dirname = __bannerPath.dirname(globalThis.__filename);
     path.resolve(artifactDir, "src/media/transcribe.py"),
     path.resolve(distDir, "media/transcribe.py"),
   );
+  await copyFile(
+    path.resolve(artifactDir, "src/media/track_subject.py"),
+    path.resolve(distDir, "media/track_subject.py"),
+  );
 }
 
 buildAll().catch((err) => {

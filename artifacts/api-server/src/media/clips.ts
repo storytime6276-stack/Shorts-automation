@@ -3,10 +3,11 @@ import { spawn } from "node:child_process";
 import { existsSync, promises as fs } from "node:fs";
 import path from "node:path";
 import type { HighlightCandidate } from "./highlights";
-import type { Transcript } from "./pipeline";
+import { getLocalPythonCommand, type Transcript } from "./pipeline";
 import { generateCaptionCues, makeAss, renderCaptionVideo, type CaptionCue } from "./captions";
+import { buildFramingFilter, buildFramingPlan, detectSubjectSamples, type FramingMode, type SubjectDetectionResult } from "./framing";
 
-export type ClipStatus = "queued" | "extracting" | "preparing_vertical" | "rendering_captions" | "ready" | "failed";
+export type ClipStatus = "queued" | "extracting" | "tracking_subject" | "preparing_vertical" | "rendering_captions" | "ready" | "failed";
 export type CaptionStatus = "not_requested" | "queued" | "rendering" | "ready" | "unavailable" | "failed";
 export type GeneratedClip = {
   id: string;
@@ -27,6 +28,10 @@ export type GeneratedClip = {
   captionCueCount: number;
   captionCues: CaptionCue[];
   captionError: string | null;
+  framingMode: FramingMode | "pending";
+  framingConfidence: number;
+  framingFallbackReason: string | null;
+  framingSampleCount: number;
   error: string | null;
   createdAt: string;
   updatedAt: string;
@@ -82,7 +87,7 @@ async function probe(input: string, command = ffprobe) {
     child.on("error", (error) => reject(new Error(`Unable to start ${command}: ${error.message}`)));
     child.on("close", (code) => code === 0 ? resolve(output) : reject(new Error(`ffprobe exited with code ${code ?? "unknown"}: ${stderr.trim()}`)));
   });
-  return JSON.parse(stdout) as { format?: { duration?: string }; streams?: Array<{ codec_type?: string; width?: number; height?: number }> };
+  return JSON.parse(stdout) as { format?: { duration?: string }; streams?: Array<{ codec_type?: string; width?: number; height?: number; r_frame_rate?: string }> };
 }
 
 function timestamp(value: number) { return value.toFixed(6); }
@@ -91,6 +96,11 @@ export function buildClipArgs(input: string, output: string, start: number, end:
   const args = ["-y", "-ss", timestamp(start), "-i", input, "-t", timestamp(end - start), "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20"];
   if (vertical) args.push("-vf", centerCropFilter);
   args.push("-c:a", "aac", "-b:a", "160k", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", output);
+  return args;
+}
+
+export function buildVerticalClipArgs(input: string, output: string, start: number, end: number, framingFilter: string) {
+  const args = ["-y", "-ss", timestamp(start), "-i", input, "-t", timestamp(end - start), "-map", "0:v:0", "-map", "0:a?", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-vf", framingFilter, "-c:a", "aac", "-b:a", "160k", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", output];
   return args;
 }
 
@@ -118,6 +128,10 @@ export async function createClip(jobId: string, jobDirectory: string, source: st
   const actualDuration = Number(info.format?.duration);
   if (!Number.isFinite(actualDuration) || actualDuration <= 0) throw new Error("The source video duration could not be read.");
   if (candidate.end > actualDuration + 0.05) throw new Error("Candidate end timestamp exceeds the source video duration.");
+  const sourceVideo = info.streams?.find((stream) => stream.codec_type === "video");
+  const frameRateParts = sourceVideo?.r_frame_rate?.split("/").map(Number) ?? [];
+  const sourceFrameRate = frameRateParts.length === 2 && frameRateParts[1] > 0 ? frameRateParts[0] / frameRateParts[1] : 30;
+  const sourceDimensions = { width: sourceVideo?.width ?? 1920, height: sourceVideo?.height ?? 1080 };
   const captionCues = captionsEnabled ? generateCaptionCues(transcript, candidate.start, candidate.end) : [];
   const id = randomUUID();
   const directory = path.join(jobDirectory, "clips", id);
@@ -133,15 +147,19 @@ export async function createClip(jobId: string, jobDirectory: string, source: st
     captionCueCount: captionCues.length,
     captionCues,
     captionError: captionsEnabled && !captionCues.length ? "No timestamped transcript cues overlap this clip." : null,
+    framingMode: "pending",
+    framingConfidence: 0,
+    framingFallbackReason: null,
+    framingSampleCount: 0,
     error: null,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
   };
   await update(jobDirectory, clip, {});
-  void generate(jobId, jobDirectory, source, directory, clip, commands);
+  void generate(jobId, jobDirectory, source, directory, clip, commands, sourceDimensions, sourceFrameRate);
   return clip;
 }
 
-async function generate(jobId: string, jobDirectory: string, source: string, directory: string, clip: GeneratedClip, commands: { ffmpeg: string; ffprobe: string }) {
+async function generate(jobId: string, jobDirectory: string, source: string, directory: string, clip: GeneratedClip, commands: { ffmpeg: string; ffprobe: string }, sourceDimensions: { width: number; height: number }, sourceFrameRate: number) {
   const preview = path.join(directory, "preview.mp4");
   const vertical = path.join(directory, "vertical.mp4");
   const captions = path.join(directory, "captions.ass");
@@ -150,8 +168,20 @@ async function generate(jobId: string, jobDirectory: string, source: string, dir
   try {
     await update(jobDirectory, clip, { status: "extracting", progress: 10 });
     await run(commands.ffmpeg, buildClipArgs(source, preview, clip.start, clip.end, false), directory);
-    await update(jobDirectory, clip, { status: "preparing_vertical", progress: 55 });
-    await run(commands.ffmpeg, buildClipArgs(source, vertical, clip.start, clip.end, true), directory);
+    await update(jobDirectory, clip, { status: "tracking_subject", progress: 38 });
+    let detection: SubjectDetectionResult | null = null;
+    let framingPlan = buildFramingPlan(sourceDimensions.width, sourceDimensions.height, clip.end - clip.start, [], 0);
+    try {
+      detection = await detectSubjectSamples(source, clip.start, clip.end, getLocalPythonCommand());
+      framingPlan = buildFramingPlan(detection.width, detection.height, detection.durationSeconds, detection.samples, detection.expectedSampleCount);
+    } catch (error) {
+      framingPlan = buildFramingPlan(sourceDimensions.width, sourceDimensions.height, clip.end - clip.start, [], 0);
+      framingPlan.reason = error instanceof Error ? error.message : String(error);
+    }
+    const frameRate = detection?.fps ?? sourceFrameRate;
+    const framingFilter = buildFramingFilter(framingPlan, frameRate, centerCropFilter);
+    await update(jobDirectory, clip, { status: "preparing_vertical", progress: 55, framingMode: framingPlan.mode, framingConfidence: framingPlan.confidence, framingFallbackReason: framingPlan.reason, framingSampleCount: framingPlan.points.length });
+    await run(commands.ffmpeg, buildVerticalClipArgs(source, vertical, clip.start, clip.end, framingFilter), directory);
     if (clip.captionsEnabled && clip.captionCueCount > 0) {
       renderingCaptions = true;
       await update(jobDirectory, clip, { status: "rendering_captions", progress: 78, captionStatus: "rendering" });

@@ -75,6 +75,8 @@ test("clip extraction validates intervals, persists metadata, and creates a real
       const clip = await waitForClip(jobDirectory, created.id);
       assert.equal(clip.status, "ready", clip.error ?? "clip should be ready");
       assert.equal(clip.progress, 100);
+      assert.ok(clip.framingMode === "subject_tracking" || clip.framingMode === "center_crop");
+      assert.ok(clip.framingSampleCount >= 0);
       assert.ok(Math.abs((clip.extractedDurationSeconds ?? 0) - 3) <= 0.08, `expected about 3 seconds, got ${clip.extractedDurationSeconds}`);
       assert.deepEqual([clip.width, clip.height], [1080, 1920]);
       assert.ok(clip.previewUrl?.endsWith("/preview"));
