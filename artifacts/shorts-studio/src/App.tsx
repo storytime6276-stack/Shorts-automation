@@ -156,6 +156,16 @@ function TranscriptViewer({ segmentList, language, duration }: { segmentList: Tr
   );
 }
 
+type ClipQaCheckView = { id: string; label: string; status: 'passed' | 'failed' | 'skipped'; message: string };
+type ClipView = {
+  id: string; jobId?: string; candidateId: string; start: number; end: number; status: string; progress: number; error: string | null;
+  previewUrl: string | null; verticalUrl: string | null; finalUrl: string | null; width: number | null; height: number | null;
+  captionsEnabled: boolean; captionStatus: string; captionCueCount: number; captionError: string | null;
+  framingMode?: string; framingConfidence?: number; framingFallbackReason?: string | null;
+  packaging?: { status: 'available' | 'unavailable' | 'failed'; title: string | null; description: string | null; tags: string[]; error: string | null };
+  qa?: { status: 'passed' | 'failed'; checks: ClipQaCheckView[]; media?: { formatDurationSeconds: number | null } | null } | null;
+};
+
 function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnalyzing, onAnalyze }: { jobId: string; duration?: number | null; analysis?: HighlightAnalysis; isLoading: boolean; isError: boolean; isAnalyzing: boolean; onAnalyze: () => void }) {
   const scoreComponents = [
     { label: 'Hook', key: 'hook' },
@@ -176,9 +186,10 @@ function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnaly
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [range, setRange] = useState({ start: '', end: '' });
   const [saveError, setSaveError] = useState<string | null>(null);
-  const [clip, setClip] = useState<{ id: string; status: string; progress: number; error: string | null; previewUrl: string | null; verticalUrl: string | null; finalUrl: string | null; width: number | null; height: number | null; captionsEnabled: boolean; captionStatus: string; captionCueCount: number; captionError: string | null; framingMode?: string; framingConfidence?: number; framingFallbackReason?: string | null } | null>(null);
+  const [clip, setClip] = useState<ClipView | null>(null);
   const [clipError, setClipError] = useState<string | null>(null);
   const [creatingClip, setCreatingClip] = useState(false);
+  const clipFetchSequence = useRef(0);
   const [captionsEnabled, setCaptionsEnabled] = useState(true);
   const updateCandidate = useUpdateHighlightCandidate();
   const candidates = analysis?.candidates ?? [];
@@ -192,6 +203,25 @@ function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnaly
     setSelectedId(selected.id);
     setRange({ start: selected.start.toFixed(2), end: selected.end.toFixed(2) });
   }, [analysis, selected]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const fetchSequence = ++clipFetchSequence.current;
+    setClip(null);
+    setClipError(null);
+    if (!selected) return () => { cancelled = true; };
+    void fetch(`/api/jobs/${jobId}/clips`).then((response) => {
+      if (!response.ok) throw new Error('Saved clips could not be loaded.');
+      return response.json();
+    }).then((data) => {
+      if (cancelled || fetchSequence !== clipFetchSequence.current) return;
+      const existing = (Array.isArray(data.clips) ? data.clips as ClipView[] : [])
+        .filter((item) => item.candidateId === selected.id && item.start === selected.start && item.end === selected.end)
+        .sort((a, b) => String((b as ClipView & { createdAt?: string }).createdAt ?? '').localeCompare(String((a as ClipView & { createdAt?: string }).createdAt ?? '')))[0];
+      setClip(existing ?? null);
+    }).catch(() => { if (!cancelled && fetchSequence === clipFetchSequence.current) setClipError('Saved clip data could not be loaded.'); });
+    return () => { cancelled = true; };
+  }, [jobId, selected?.id, selected?.start, selected?.end]);
 
   const saveRange = () => {
     if (!selected) return;
@@ -209,7 +239,7 @@ function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnaly
   };
 
   useEffect(() => {
-    if (!clip || !['queued', 'extracting', 'tracking_subject', 'preparing_vertical', 'rendering_captions'].includes(clip.status)) return;
+    if (!clip || !['queued', 'extracting', 'tracking_subject', 'preparing_vertical', 'rendering_captions', 'validating_output'].includes(clip.status)) return;
     let cancelled = false;
     const timer = window.setInterval(() => {
       void fetch(`/api/jobs/${jobId}/clips`).then((response) => response.json()).then((data) => {
@@ -224,6 +254,7 @@ function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnaly
 
   const generateClip = async () => {
     if (!selected) return;
+    clipFetchSequence.current += 1;
     setClipError(null);
     setClip(null);
     setCreatingClip(true);
@@ -244,7 +275,7 @@ function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnaly
       <div className="flex flex-wrap items-start justify-between gap-4 border-b border-border px-5 py-5">
         <div>
           <div className="flex items-center gap-2"><Scissors size={16} className="text-[hsl(var(--accent))]" /><h2 className="text-sm font-extrabold tracking-tight">Highlight candidates</h2></div>
-          <p className="mt-1 pl-6 text-xs leading-5 text-muted-foreground">Ranked from adjacent transcript ranges using deterministic local signals. Nothing is rendered yet.</p>
+          <p className="mt-1 pl-6 text-xs leading-5 text-muted-foreground">Ranked from adjacent transcript ranges using deterministic local signals. Generate a vertical Short with transcript-based packaging and final media checks.</p>
         </div>
         <button type="button" onClick={onAnalyze} disabled={isAnalyzing} data-testid="button-analyze-highlights" className="flex items-center gap-2 rounded-lg border border-[hsl(var(--primary)/.45)] bg-[hsl(var(--primary)/.1)] px-3 py-2 text-xs font-bold text-foreground transition-colors hover:bg-[hsl(var(--primary)/.18)] disabled:cursor-wait disabled:opacity-60">
           {isAnalyzing ? <Loader2 size={14} className="animate-spin" /> : <Sparkles size={14} />}
@@ -273,7 +304,14 @@ function HighlightPanel({ jobId, duration, analysis, isLoading, isError, isAnaly
                 {creatingClip ? <Loader2 size={14} className="animate-spin" /> : <Film size={14} />} Generate 9:16 clip
               </button>
               {(Number(range.start) !== selected.start || Number(range.end) !== selected.end) ? <p className="mt-2 text-[10px] leading-4 text-muted-foreground">Save the adjusted range before generating a clip.</p> : null}
-              {clip ? <div className="mt-3" data-testid="clip-generation-status"><div className="flex items-center justify-between text-xs"><span className="font-semibold">{clip.status === 'queued' ? 'Queued' : clip.status === 'extracting' ? 'Extracting source segment' : clip.status === 'tracking_subject' ? 'Finding and tracking subject' : clip.status === 'preparing_vertical' ? 'Preparing vertical crop' : clip.status === 'rendering_captions' ? 'Burning in captions' : clip.status === 'ready' ? `Ready · ${clip.width}×${clip.height}` : 'Failed'}</span><span className="font-mono text-muted-foreground">{clip.progress}%</span></div><div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-[hsl(var(--primary))] transition-all" style={{ width: `${clip.progress}%` }} /></div>{clip.status === 'ready' && (clip.finalUrl || clip.verticalUrl) ? <><p className="mt-2 text-[10px] text-muted-foreground">{clip.framingMode === 'subject_tracking' ? `Subject framing applied · ${Math.round((clip.framingConfidence ?? 0) * 100)}% confidence.` : clip.framingMode === 'center_crop' ? `Center crop used${clip.framingFallbackReason ? ` · ${clip.framingFallbackReason}` : '.'}` : 'Center crop framing.'}</p><p className="mt-2 text-[10px] text-muted-foreground">{clip.captionStatus === 'ready' ? `${clip.captionCueCount} synchronized caption cues burned in.` : clip.captionStatus === 'unavailable' ? (clip.captionError || 'Transcript captions are unavailable for this range.') : clip.captionStatus === 'not_requested' ? 'Captions disabled.' : 'Previously generated clip.'}</p><video className="mt-3 max-h-80 w-full rounded-lg bg-black" controls playsInline src={clip.finalUrl || clip.verticalUrl || undefined} data-testid="video-generated-clip" /></> : null}{clip.status === 'failed' && clip.error ? <p className="mt-2 text-xs leading-5 text-red-700 dark:text-red-300">{clip.error}</p> : null}{clip.captionStatus === 'failed' && clip.captionError ? <p className="mt-2 text-xs leading-5 text-red-700 dark:text-red-300">Caption rendering failed: {clip.captionError}</p> : null}</div> : null}
+              {clip ? <div className="mt-3" data-testid="clip-generation-status">
+                <div className="flex items-center justify-between text-xs"><span className="font-semibold">{clip.status === 'queued' ? 'Queued' : clip.status === 'extracting' ? 'Extracting source segment' : clip.status === 'tracking_subject' ? 'Finding and tracking subject' : clip.status === 'preparing_vertical' ? 'Preparing vertical crop' : clip.status === 'rendering_captions' ? 'Burning in captions' : clip.status === 'validating_output' ? 'Running final quality checks' : clip.status === 'ready' && clip.qa?.status === 'passed' ? `Ready · ${clip.width}×${clip.height}` : clip.status === 'ready' ? 'Not export-ready · QA report missing' : 'Failed'}</span><span className="font-mono text-muted-foreground">{clip.progress}%</span></div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted"><div className="h-full rounded-full bg-[hsl(var(--primary))] transition-all" style={{ width: `${clip.progress}%` }} /></div>
+                {clip.packaging ? <div className="mt-3 rounded-lg border border-border bg-background/70 p-3" data-testid="clip-packaging"><p className="font-mono text-[10px] uppercase tracking-[.12em] text-muted-foreground">Short packaging · {clip.packaging.status}</p>{clip.packaging.title ? <p className="mt-2 text-xs font-bold">{clip.packaging.title}</p> : null}{clip.packaging.description ? <p className="mt-1 text-xs leading-5 text-muted-foreground">{clip.packaging.description}</p> : null}{clip.packaging.tags.length ? <p className="mt-2 text-[10px] text-[hsl(var(--accent))]">{clip.packaging.tags.join(' ')}</p> : null}{clip.packaging.error ? <p className="mt-1 text-[10px] text-red-700 dark:text-red-300">{clip.packaging.error}</p> : null}</div> : null}
+                {clip.qa ? <div className="mt-3 rounded-lg border border-border bg-background/70 p-3" data-testid="clip-qa"><div className="flex items-center justify-between"><p className="font-mono text-[10px] uppercase tracking-[.12em] text-muted-foreground">Final QA</p><span className={`rounded-full px-2 py-1 text-[10px] font-bold ${clip.qa.status === 'passed' ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' : 'bg-red-500/10 text-red-700 dark:text-red-300'}`} data-testid="clip-qa-overall">{clip.qa.status === 'passed' ? 'PASS' : 'FAIL'}</span></div><ul className="mt-2 space-y-1.5">{clip.qa.checks.map((check) => { const Icon = check.status === 'passed' ? Check : check.status === 'failed' ? X : Clock3; return <li key={check.id} className="flex items-start gap-2 text-[10px] leading-4"><Icon size={12} className={`mt-0.5 shrink-0 ${check.status === 'passed' ? 'text-emerald-600' : check.status === 'failed' ? 'text-red-600' : 'text-muted-foreground'}`} /><span><strong>{check.label} · {check.status}</strong><span className="block text-muted-foreground">{check.message}</span></span></li>; })}</ul></div> : clip.status === 'ready' ? <p className="mt-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs text-amber-800 dark:text-amber-200" data-testid="clip-qa-missing">This saved clip has no QA report and cannot be exported. Generate it again to validate the artifact.</p> : null}
+                {clip.status === 'ready' && clip.qa?.status === 'passed' && clip.finalUrl ? <><p className="mt-2 text-[10px] text-muted-foreground">{clip.framingMode === 'subject_tracking' ? `Subject framing applied · ${Math.round((clip.framingConfidence ?? 0) * 100)}% confidence.` : clip.framingMode === 'center_crop' ? `Center crop used${clip.framingFallbackReason ? ` · ${clip.framingFallbackReason}` : '.'}` : 'Center crop framing.'}</p><p className="mt-1 text-[10px] text-muted-foreground">{clip.captionStatus === 'ready' ? `${clip.captionCueCount} synchronized caption cues burned in.` : clip.captionStatus === 'unavailable' ? (clip.captionError || 'Transcript captions are unavailable for this range.') : clip.captionStatus === 'not_requested' ? 'Captions disabled.' : 'Previously generated clip.'}</p><video className="mt-3 max-h-80 w-full rounded-lg bg-black" controls playsInline src={clip.finalUrl} data-testid="video-generated-clip" /><a href={clip.finalUrl} download className="mt-3 flex w-full items-center justify-center gap-2 rounded-lg bg-[hsl(var(--primary))] px-3 py-2.5 text-xs font-extrabold text-[hsl(var(--primary-foreground))]" data-testid="button-download-verified-clip"><Video size={14} /> Download verified MP4</a></> : null}
+                {clip.status === 'failed' && clip.error ? <p className="mt-2 text-xs leading-5 text-red-700 dark:text-red-300">{clip.error}</p> : null}{clip.captionStatus === 'failed' && clip.captionError ? <p className="mt-2 text-xs leading-5 text-red-700 dark:text-red-300">Caption rendering failed: {clip.captionError}</p> : null}
+              </div> : null}
               {clipError ? <p className="mt-2 text-xs leading-5 text-red-700 dark:text-red-300" data-testid="error-clip-generation">{clipError}</p> : null}
             </div>
             <div className="mt-5 border-t border-border pt-4"><p className="font-mono text-[10px] uppercase tracking-[.14em] text-muted-foreground">Why it ranked</p><ul className="mt-2 space-y-2">{selected.reasons.map((reason) => <li key={reason} className="flex gap-2 text-xs leading-5 text-muted-foreground"><span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-[hsl(var(--accent))]" />{reason}</li>)}</ul></div>

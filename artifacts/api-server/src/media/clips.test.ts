@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import type { HighlightCandidate } from "./highlights";
 import type { Transcript } from "./pipeline";
-import { buildClipArgs, centerCropFilter, clipFilePath, createClip, readClips, verticalOutput, type GeneratedClip } from "./clips";
+import { buildClipArgs, centerCropFilter, clipFilePath, createClip, isClipExportReady, readClips, verticalOutput, type GeneratedClip } from "./clips";
 
 function command(bin: string, args: string[], cwd: string) {
   return new Promise<string>((resolve, reject) => {
@@ -70,11 +70,25 @@ test("clip extraction validates intervals, persists metadata, and creates a real
       assert.equal(args[args.indexOf("-vf") + 1], centerCropFilter);
       assert.ok(args.includes("0:a?"), "original audio is mapped when present");
     });
-    await t.test("real extraction preserves timestamps, audio, and persists generated metadata", async () => {
+    await t.test("real extraction preserves timestamps, audio, and persists generated metadata", async (t) => {
       const created = await createClip("job-1", jobDirectory, source, candidate(2.25, 5.25), 8, transcriptFor(2.25, 5.25));
       const clip = await waitForClip(jobDirectory, created.id);
       assert.equal(clip.status, "ready", clip.error ?? "clip should be ready");
       assert.equal(clip.progress, 100);
+      assert.equal(clip.jobId, "job-1");
+      assert.equal(clip.packaging.status, "available");
+      assert.equal(clip.packaging.title, "Why does this story matter");
+      assert.match(clip.packaging.description ?? "", /changes how we remember/);
+      assert.ok(clip.packaging.tags.includes("#shorts"));
+      assert.equal(clip.qa?.status, "passed");
+      assert.equal(isClipExportReady(clip), true);
+      assert.equal(clip.qa?.media?.formatName?.split(",").includes("mp4"), true);
+      assert.deepEqual([clip.qa?.media?.width, clip.qa?.media?.height], [1080, 1920]);
+      assert.ok((clip.qa?.media?.videoFrameCount ?? 0) > 0);
+      assert.ok((clip.qa?.media?.audioPacketCount ?? 0) > 0);
+      assert.equal(clip.qa?.checks.find((item) => item.id === "captions")?.status, "passed");
+      assert.ok(clip.qa?.checks.every((item) => item.status === "passed"), "all required QA checks should pass for the synthetic clip");
+      assert.ok(Math.abs((clip.qa?.media?.audioDurationSeconds ?? 0) - (clip.qa?.media?.videoDurationSeconds ?? 0)) <= 0.15);
       assert.ok(clip.framingMode === "subject_tracking" || clip.framingMode === "center_crop");
       assert.ok(clip.framingSampleCount >= 0);
       assert.ok(Math.abs((clip.extractedDurationSeconds ?? 0) - 3) <= 0.08, `expected about 3 seconds, got ${clip.extractedDurationSeconds}`);
@@ -87,6 +101,11 @@ test("clip extraction validates intervals, persists metadata, and creates a real
       assert.ok(clip.captionCues.every((cue) => cue.start >= 0 && cue.end <= 3));
       const saved = (await readClips(jobDirectory)).find((item) => item.id === created.id);
       assert.deepEqual(saved, clip);
+      assert.deepEqual(saved?.packaging, clip.packaging);
+      assert.deepEqual(saved?.qa, clip.qa);
+      assert.equal(saved?.width, clip.qa?.media?.width);
+      assert.equal(saved?.height, clip.qa?.media?.height);
+      assert.equal(saved?.extractedDurationSeconds, clip.qa?.media?.formatDurationSeconds);
       const ass = await readFile(path.join(jobDirectory, "clips", clip.id, "captions.ass"), "utf8");
       assert.match(ass, /Dialogue: 0,/);
       const finalFile = clipFilePath(jobDirectory, clip.id, "final");
@@ -95,6 +114,7 @@ test("clip extraction validates intervals, persists metadata, and creates a real
       assert.ok(details.streams.some((stream) => stream.codec_type === "audio"), "generated clip retains audio");
       assert.ok(Math.abs(Number(details.format.duration) - 3) <= 0.08);
       assert.ok((await readFile(finalFile)).byteLength > 1024);
+      t.diagnostic(`Synthetic MP4 QA: ${JSON.stringify({ container: clip.qa?.media?.formatName, videoCodec: clip.qa?.media?.videoCodec, resolution: `${clip.qa?.media?.width}x${clip.qa?.media?.height}`, videoDurationSeconds: clip.qa?.media?.videoDurationSeconds, audioCodec: clip.qa?.media?.audioCodec, audioDurationSeconds: clip.qa?.media?.audioDurationSeconds, captionCueCount: clip.captionCueCount, qa: clip.qa?.status, checks: clip.qa?.checks.map((item) => `${item.id}:${item.status}`) })}`);
     });
     await t.test("the Clip Studio captions control can produce a clean final without burn-in", async () => {
       const created = await createClip("job-1", jobDirectory, source, candidate(1, 3), 8, transcriptFor(1, 3), false);
@@ -104,13 +124,35 @@ test("clip extraction validates intervals, persists metadata, and creates a real
       assert.equal(clip.captionStatus, "not_requested");
       assert.equal(clip.captionCueCount, 0);
       assert.ok(clip.finalUrl);
+      assert.equal(clip.qa?.status, "passed");
+      assert.equal(clip.qa?.checks.find((item) => item.id === "captions")?.status, "skipped");
       await assert.rejects(readFile(path.join(jobDirectory, "clips", clip.id, "captions.ass")), { code: "ENOENT" });
+    });
+    await t.test("missing transcript packaging is graceful and enabled captions fail QA safely", async () => {
+      const noCaptionTranscript = await createClip("job-1", jobDirectory, source, candidate(1, 2), 8, null, false);
+      const noCaptionClip = await waitForClip(jobDirectory, noCaptionTranscript.id);
+      assert.equal(noCaptionClip.status, "ready", noCaptionClip.error ?? "clip without transcript can be generated with captions disabled");
+      assert.equal(noCaptionClip.packaging.status, "unavailable");
+      assert.equal(noCaptionClip.packaging.title, null);
+      assert.equal(noCaptionClip.qa?.status, "passed");
+
+      const captionsRequested = await createClip("job-1", jobDirectory, source, candidate(1, 2), 8, null, true);
+      const rejected = await waitForClip(jobDirectory, captionsRequested.id);
+      assert.equal(rejected.status, "failed");
+      assert.equal(rejected.packaging.status, "unavailable");
+      assert.equal(rejected.qa?.status, "failed");
+      assert.equal(isClipExportReady(rejected), false);
+      assert.equal(rejected.qa?.checks.find((item) => item.id === "captions")?.status, "failed");
+      assert.equal(rejected.finalUrl, null, "a clip that fails QA must not be exportable");
+      await assert.rejects(readFile(clipFilePath(jobDirectory, rejected.id, "final")), { code: "ENOENT" });
     });
     await t.test("FFmpeg failure is persisted and partial files are cleaned", async () => {
       const created = await createClip("job-1", jobDirectory, source, candidate(1, 2), 8, transcriptFor(1, 2), true, { ffmpeg: "shorts-test-ffmpeg-that-does-not-exist", ffprobe });
       const clip = await waitForClip(jobDirectory, created.id);
       assert.equal(clip.status, "failed");
       assert.match(clip.error ?? "", /Unable to start/);
+      assert.equal(clip.qa?.status, "failed");
+      assert.equal(clip.qa?.checks.find((item) => item.id === "ffmpeg_render")?.status, "failed");
       assert.equal(clip.previewUrl, null);
       assert.equal(clip.verticalUrl, null);
       assert.equal(clip.finalUrl, null);

@@ -6,11 +6,14 @@ import type { HighlightCandidate } from "./highlights";
 import { getLocalPythonCommand, type Transcript } from "./pipeline";
 import { generateCaptionCues, makeAss, renderCaptionVideo, type CaptionCue } from "./captions";
 import { buildFramingFilter, buildFramingPlan, detectSubjectSamples, type FramingMode, type SubjectDetectionResult } from "./framing";
+import { addPersistedMetadataCheck, failedClipQa, runClipQa, type ClipQaReport } from "./qa";
+import { failedPackaging, generateClipPackaging, type PackagingMetadata } from "./packaging";
 
-export type ClipStatus = "queued" | "extracting" | "tracking_subject" | "preparing_vertical" | "rendering_captions" | "ready" | "failed";
+export type ClipStatus = "queued" | "extracting" | "tracking_subject" | "preparing_vertical" | "rendering_captions" | "validating_output" | "ready" | "failed";
 export type CaptionStatus = "not_requested" | "queued" | "rendering" | "ready" | "unavailable" | "failed";
 export type GeneratedClip = {
   id: string;
+  jobId: string;
   candidateId: string;
   status: ClipStatus;
   progress: number;
@@ -28,6 +31,9 @@ export type GeneratedClip = {
   captionCueCount: number;
   captionCues: CaptionCue[];
   captionError: string | null;
+  audioRequired: boolean;
+  packaging: PackagingMetadata;
+  qa: ClipQaReport | null;
   framingMode: FramingMode | "pending";
   framingConfidence: number;
   framingFallbackReason: string | null;
@@ -121,7 +127,7 @@ async function update(jobDirectory: string, clip: GeneratedClip, patch: Partial<
   }
 }
 
-export async function createClip(jobId: string, jobDirectory: string, source: string, candidate: HighlightCandidate, sourceDuration: number | null, transcript: Transcript, captionsEnabled = true, commands = { ffmpeg, ffprobe }): Promise<GeneratedClip> {
+export async function createClip(jobId: string, jobDirectory: string, source: string, candidate: HighlightCandidate, sourceDuration: number | null, transcript: Transcript | null, captionsEnabled = true, commands = { ffmpeg, ffprobe }): Promise<GeneratedClip> {
   if (!existsSync(source)) throw new Error("The source video no longer exists.");
   if (!Number.isFinite(candidate.start) || !Number.isFinite(candidate.end) || candidate.start < 0 || candidate.end <= candidate.start) throw new Error("Candidate timestamps must be finite, non-negative, and end after start.");
   const info = await probe(source, commands.ffprobe);
@@ -132,12 +138,15 @@ export async function createClip(jobId: string, jobDirectory: string, source: st
   const frameRateParts = sourceVideo?.r_frame_rate?.split("/").map(Number) ?? [];
   const sourceFrameRate = frameRateParts.length === 2 && frameRateParts[1] > 0 ? frameRateParts[0] / frameRateParts[1] : 30;
   const sourceDimensions = { width: sourceVideo?.width ?? 1920, height: sourceVideo?.height ?? 1080 };
-  const captionCues = captionsEnabled ? generateCaptionCues(transcript, candidate.start, candidate.end) : [];
+  let packaging: PackagingMetadata;
+  try { packaging = generateClipPackaging(transcript, candidate.start, candidate.end); }
+  catch (error) { packaging = failedPackaging(error); }
+  const captionCues = captionsEnabled && transcript ? generateCaptionCues(transcript, candidate.start, candidate.end) : [];
   const id = randomUUID();
   const directory = path.join(jobDirectory, "clips", id);
   await fs.mkdir(directory, { recursive: true });
   const clip: GeneratedClip = {
-    id, candidateId: candidate.id, status: "queued", progress: 0,
+    id, jobId, candidateId: candidate.id, status: "queued", progress: 0,
     start: candidate.start, end: candidate.end,
     sourceDurationSeconds: sourceDuration ?? actualDuration,
     extractedDurationSeconds: null, width: null, height: null,
@@ -147,6 +156,9 @@ export async function createClip(jobId: string, jobDirectory: string, source: st
     captionCueCount: captionCues.length,
     captionCues,
     captionError: captionsEnabled && !captionCues.length ? "No timestamped transcript cues overlap this clip." : null,
+    audioRequired: info.streams?.some((stream) => stream.codec_type === "audio") ?? false,
+    packaging,
+    qa: null,
     framingMode: "pending",
     framingConfidence: 0,
     framingFallbackReason: null,
@@ -165,9 +177,11 @@ async function generate(jobId: string, jobDirectory: string, source: string, dir
   const captions = path.join(directory, "captions.ass");
   const final = path.join(directory, "final.mp4");
   let renderingCaptions = false;
+  let stage = "source extraction";
   try {
     await update(jobDirectory, clip, { status: "extracting", progress: 10 });
     await run(commands.ffmpeg, buildClipArgs(source, preview, clip.start, clip.end, false), directory);
+    stage = "subject tracking and vertical render";
     await update(jobDirectory, clip, { status: "tracking_subject", progress: 38 });
     let detection: SubjectDetectionResult | null = null;
     let framingPlan = buildFramingPlan(sourceDimensions.width, sourceDimensions.height, clip.end - clip.start, [], 0);
@@ -184,6 +198,7 @@ async function generate(jobId: string, jobDirectory: string, source: string, dir
     await run(commands.ffmpeg, buildVerticalClipArgs(source, vertical, clip.start, clip.end, framingFilter), directory);
     if (clip.captionsEnabled && clip.captionCueCount > 0) {
       renderingCaptions = true;
+      stage = "caption rendering";
       await update(jobDirectory, clip, { status: "rendering_captions", progress: 78, captionStatus: "rendering" });
       await fs.writeFile(captions, makeAss(clip.captionCues), "utf8");
       await renderCaptionVideo(vertical, captions, final, commands.ffmpeg);
@@ -191,20 +206,66 @@ async function generate(jobId: string, jobDirectory: string, source: string, dir
     } else {
       await fs.copyFile(vertical, final);
     }
-    const output = await probe(final, commands.ffprobe);
-    const duration = Number(output.format?.duration);
-    const video = output.streams?.find((stream) => stream.codec_type === "video");
-    if (!video?.width || !video.height || video.width !== verticalOutput.width || video.height !== verticalOutput.height) throw new Error("FFmpeg did not produce the expected 1080x1920 vertical video.");
-    if (!Number.isFinite(duration) || duration <= 0) throw new Error("FFmpeg produced a vertical video with an invalid duration.");
-    await update(jobDirectory, clip, { status: "ready", progress: 100, extractedDurationSeconds: duration, width: video.width, height: video.height, previewUrl: `/api/jobs/${jobId}/clips/${clip.id}/preview`, verticalUrl: `/api/jobs/${jobId}/clips/${clip.id}/vertical`, finalUrl: `/api/jobs/${jobId}/clips/${clip.id}/final`, captionStatus: clip.captionCueCount ? "ready" : clip.captionStatus, error: null });
+    stage = "final artifact QA";
+    await update(jobDirectory, clip, { status: "validating_output", progress: 92 });
+    const qa = await runClipQa({
+      file: final,
+      expectedDurationSeconds: clip.end - clip.start,
+      audioRequired: clip.audioRequired,
+      captionsEnabled: clip.captionsEnabled,
+      captionCueCount: clip.captionCueCount,
+      captionRenderCompleted: clip.captionStatus === "ready" && renderingCaptions,
+      captionsFile: captions,
+      ffmpeg: commands.ffmpeg,
+      ffprobe: commands.ffprobe,
+    });
+    if (qa.status !== "passed") {
+      const failedChecks = qa.checks.filter((item) => item.status === "failed").map((item) => `${item.label}: ${item.message}`);
+      await Promise.all([fs.rm(preview, { force: true }), fs.rm(vertical, { force: true }), fs.rm(final, { force: true }), fs.rm(captions, { force: true })]);
+      await fs.rm(directory, { recursive: true, force: true });
+      await update(jobDirectory, clip, { status: "failed", progress: 100, qa, error: `Final clip failed QA. ${failedChecks.join(" ")}`, previewUrl: null, verticalUrl: null, finalUrl: null });
+      return;
+    }
+    const media = qa.media!;
+    await update(jobDirectory, clip, { status: "validating_output", progress: 98, qa, extractedDurationSeconds: media.formatDurationSeconds, width: media.width, height: media.height });
+    const persisted = (await readClips(jobDirectory)).find((item) => item.id === clip.id);
+    const metadataMatches = !!persisted
+      && persisted.jobId === jobId
+      && persisted.candidateId === clip.candidateId
+      && persisted.start === clip.start
+      && persisted.end === clip.end
+      && persisted.audioRequired === clip.audioRequired
+      && persisted.captionsEnabled === clip.captionsEnabled
+      && persisted.captionCueCount === clip.captionCueCount
+      && persisted.width === media.width
+      && persisted.height === media.height
+      && persisted.extractedDurationSeconds === media.formatDurationSeconds
+      && persisted.qa?.status === "passed"
+      && persisted.qa.media?.formatDurationSeconds === media.formatDurationSeconds
+      && persisted.qa.media?.videoDurationSeconds === media.videoDurationSeconds;
+    const finalQa = addPersistedMetadataCheck(qa, metadataMatches, metadataMatches
+      ? "Saved job/clip range, audio/caption settings, output dimensions, and duration match the FFprobe report for the rendered artifact."
+      : "Saved clip metadata does not match the generated artifact or its FFprobe report.");
+    if (finalQa.status !== "passed") {
+      const failedChecks = finalQa.checks.filter((item) => item.status === "failed").map((item) => `${item.label}: ${item.message}`);
+      await Promise.all([fs.rm(preview, { force: true }), fs.rm(vertical, { force: true }), fs.rm(final, { force: true }), fs.rm(captions, { force: true })]);
+      await fs.rm(directory, { recursive: true, force: true });
+      await update(jobDirectory, clip, { status: "failed", progress: 100, qa: finalQa, error: `Final clip failed QA. ${failedChecks.join(" ")}`, previewUrl: null, verticalUrl: null, finalUrl: null });
+      return;
+    }
+    await update(jobDirectory, clip, { status: "ready", progress: 100, qa: finalQa, previewUrl: `/api/jobs/${jobId}/clips/${clip.id}/preview`, verticalUrl: `/api/jobs/${jobId}/clips/${clip.id}/vertical`, finalUrl: `/api/jobs/${jobId}/clips/${clip.id}/final`, error: null });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     await Promise.all([fs.rm(preview, { force: true }), fs.rm(vertical, { force: true }), fs.rm(final, { force: true }), fs.rm(captions, { force: true })]);
     await fs.rm(directory, { recursive: true, force: true });
-    await update(jobDirectory, clip, { status: "failed", progress: 100, error: message, captionStatus: renderingCaptions ? "failed" : clip.captionStatus, captionError: renderingCaptions ? message : clip.captionError, previewUrl: null, verticalUrl: null, finalUrl: null });
+    await update(jobDirectory, clip, { status: "failed", progress: 100, qa: failedClipQa(stage, error, clip.captionsEnabled), error: message, captionStatus: renderingCaptions ? "failed" : clip.captionStatus, captionError: renderingCaptions ? message : clip.captionError, previewUrl: null, verticalUrl: null, finalUrl: null });
   }
 }
 
 export function clipFilePath(jobDirectory: string, clipId: string, variant: "preview" | "vertical" | "final") {
   return path.join(jobDirectory, "clips", clipId, `${variant}.mp4`);
+}
+
+export function isClipExportReady(clip: Pick<GeneratedClip, "status" | "qa">) {
+  return clip.status === "ready" && clip.qa?.status === "passed";
 }

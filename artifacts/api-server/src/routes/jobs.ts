@@ -20,7 +20,7 @@ import {
   readAnalysis,
   updateCandidate,
 } from "../media/highlights";
-import { clipFilePath, createClip, readClips } from "../media/clips";
+import { clipFilePath, createClip, isClipExportReady, readClips } from "../media/clips";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import type { Transcript } from "../media/pipeline";
@@ -234,7 +234,7 @@ router.get("/jobs/:jobId/clips/:clipId/:variant", async (req, res) => {
   }
   try {
     const clips = await readClips(job.paths.directory);
-    const clip = clips.find((item) => item.id === req.params.clipId && item.status === "ready");
+    const clip = clips.find((item) => item.id === req.params.clipId && isClipExportReady(item));
     if (!clip) {
       res.status(404).json({ error: "Generated clip is not ready." });
       return;
