@@ -71,6 +71,21 @@ router.get("/jobs/:jobId", async (req, res) => {
   res.json(GetJobResponse.parse(job));
 });
 
+router.post("/jobs/:jobId/retry", async (req, res) => {
+  await jobStore.ready;
+  const params = GetJobParams.safeParse(req.params);
+  if (!params.success) {
+    res.status(400).json({ error: "Invalid job id." });
+    return;
+  }
+  const job = await jobStore.retry(params.data.jobId);
+  if (!job) {
+    res.status(409).json({ error: "Only failed jobs can be retried." });
+    return;
+  }
+  res.status(202).json(CreateJobResponse.parse(job));
+});
+
 router.get("/jobs/:jobId/transcript", async (req, res) => {
   await jobStore.ready;
   const params = GetTranscriptParams.safeParse(req.params);

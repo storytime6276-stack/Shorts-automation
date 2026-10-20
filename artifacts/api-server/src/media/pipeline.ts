@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
+  createReadStream,
   createWriteStream,
   existsSync,
   promises as fs,
@@ -10,7 +11,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Request } from "express";
 import { logger } from "../lib/logger";
-import { analyzeAndSave } from "./highlights";
+import { analyzeAndSave, readAnalysis } from "./highlights";
 
 export type JobStatus =
   | "queued"
@@ -50,6 +51,8 @@ export type JobRecord = {
   error: string | null;
   createdAt: string;
   updatedAt: string;
+  contentHash?: string;
+  idempotencyKey?: string;
   paths: {
     directory: string;
     input: string;
@@ -105,21 +108,18 @@ export function getLocalPythonCommand() { return pythonCommand; }
 const ffprobeCommand = process.env.FFPROBE_BIN ?? "ffprobe";
 const ffmpegCommand = process.env.FFMPEG_BIN ?? "ffmpeg";
 const whisperModel = process.env.WHISPER_MODEL ?? "small";
-const transcriberScript =
-  process.env.WHISPER_SCRIPT ??
-  path.resolve(
-    path.dirname(fileURLToPath(import.meta.url)),
-    "media/transcribe.py",
-  );
+const jobWrites = new Map<string, Promise<void>>();
+const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
+const transcriberScript = process.env.WHISPER_SCRIPT ?? path.resolve(moduleDirectory, path.basename(moduleDirectory) === "media" ? "transcribe.py" : "media/transcribe.py");
 
-let queue = Promise.resolve();
+const ffmpegThreads = Math.min(4, Math.max(1, Number(process.env.SHORTS_FFMPEG_THREADS) || 2));
 
 function now() {
   return new Date().toISOString();
 }
 
 function publicJob(job: JobRecord) {
-  const { paths: _paths, ...response } = job;
+  const { paths: _paths, contentHash: _contentHash, idempotencyKey: _idempotencyKey, ...response } = job;
   return response;
 }
 
@@ -141,8 +141,54 @@ async function writeJob(job: JobRecord) {
 }
 
 async function setJob(job: JobRecord, changes: Partial<JobRecord>) {
-  Object.assign(job, changes, { updatedAt: now() });
-  await writeJob(job);
+  const previous = jobWrites.get(job.id) ?? Promise.resolve();
+  const operation = previous.catch(() => undefined).then(async () => {
+    Object.assign(job, changes, { updatedAt: now() });
+    await writeJob(job);
+  });
+  jobWrites.set(job.id, operation);
+  try { await operation; }
+  finally { if (jobWrites.get(job.id) === operation) jobWrites.delete(job.id); }
+}
+
+async function hashFile(file: string) {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(file)) hash.update(chunk as Buffer);
+  return hash.digest("hex");
+}
+
+function validTranscript(value: unknown): value is Transcript {
+  const transcript = value as Partial<Transcript> | null;
+  return !!transcript && typeof transcript.language === "string" && Array.isArray(transcript.segments)
+    && transcript.segments.every((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && typeof segment.text === "string" && Array.isArray(segment.words));
+}
+
+async function readReusableTranscript(file: string) {
+  try {
+    const transcript: unknown = JSON.parse(await fs.readFile(file, "utf8"));
+    return validTranscript(transcript) ? transcript : null;
+  } catch { return null; }
+}
+
+async function readReusableAnalysis(file: string, jobId: string) {
+  try {
+    const analysis = await readAnalysis(file);
+    return analysis.jobId === jobId && Array.isArray(analysis.candidates) ? analysis : null;
+  } catch { return null; }
+}
+
+export async function readReusableArtifacts(job: JobRecord) {
+  const transcript = await readReusableTranscript(job.paths.transcript);
+  const analysis = transcript ? await readReusableAnalysis(job.paths.highlights, job.id) : null;
+  return { transcript, analysis };
+}
+
+async function hasValidAudio(file: string, cwd: string) {
+  try {
+    const { stdout } = await runCommand(ffprobeCommand, ["-v", "error", "-show_entries", "stream=codec_type", "-show_entries", "format=duration", "-print_format", "json", file], cwd);
+    const probe = JSON.parse(stdout) as { streams?: Array<{ codec_type?: string }>; format?: { duration?: string } };
+    return probe.streams?.some((stream) => stream.codec_type === "audio") === true && Number(probe.format?.duration) > 0;
+  } catch { return false; }
 }
 
 async function runCommand(
@@ -262,77 +308,38 @@ async function processJob(job: JobRecord) {
       media,
     });
 
-    await setJob(job, {
-      status: "extracting_audio",
-      progress: 25,
-    });
-    await runCommand(
-      ffmpegCommand,
-      [
-        "-y",
-        "-i",
-        job.paths.input,
-        "-vn",
-        "-ac",
-        "1",
-        "-ar",
-        "16000",
-        "-c:a",
-        "pcm_s16le",
-        job.paths.audio,
-      ],
-      job.paths.directory,
-    );
+    const reusable = await readReusableArtifacts(job);
+    let transcript = reusable.transcript;
+    if (!transcript) {
+      const audioValid = await hasValidAudio(job.paths.audio, job.paths.directory);
+      if (!audioValid) {
+        await setJob(job, { status: "extracting_audio", progress: 25 });
+        await fs.rm(job.paths.audio, { force: true });
+        await runCommand(ffmpegCommand, ["-y", "-i", job.paths.input, "-vn", "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", "-threads", String(ffmpegThreads), job.paths.audio], job.paths.directory);
+      }
 
-    await setJob(job, {
-      status: "transcribing",
-      progress: 45,
-    });
-    await runCommand(
-      pythonCommand,
-      [
-        transcriberScript,
-        "--input",
-        job.paths.audio,
-        "--output",
-        job.paths.transcript,
-        "--model",
-        whisperModel,
-      ],
-      job.paths.directory,
-      async (line) => {
+      await setJob(job, { status: "transcribing", progress: 45 });
+      await runCommand(pythonCommand, [transcriberScript, "--input", job.paths.audio, "--output", job.paths.transcript, "--model", whisperModel], job.paths.directory, async (line) => {
         try {
-          const event = JSON.parse(line) as {
-            type?: string;
-            progress?: number;
-          };
+          const event = JSON.parse(line) as { type?: string; progress?: number };
           if (event.type === "progress" && typeof event.progress === "number") {
-            await setJob(job, {
-              status: "transcribing",
-              progress: Math.min(99, Math.max(45, 45 + event.progress * 0.5)),
-            });
+            await setJob(job, { status: "transcribing", progress: Math.min(99, Math.max(45, 45 + event.progress * 0.5)) });
           }
-        } catch {
-          // Ignore non-JSON progress output from the local runtime.
-        }
-      },
-    );
-    const transcript = JSON.parse(
-      await fs.readFile(job.paths.transcript, "utf8"),
-    ) as Transcript;
+        } catch { /* Ignore non-JSON progress output from the local runtime. */ }
+      });
+      transcript = await readReusableTranscript(job.paths.transcript);
+      if (!transcript) throw new Error("Transcription finished without a valid persisted transcript.");
+    }
     const wordCount = transcript.segments.reduce(
       (count, segment) => count + segment.words.length,
       0,
     );
-    await setJob(job, {
-      status: "analyzing_highlights",
-      progress: 90,
-    });
-    const analysis = await analyzeAndSave(
-      job.id,
-      transcript,
-      job.paths.highlights,
-    );
+    await setJob(job, { transcript: { language: transcript.language, segmentCount: transcript.segments.length, wordCount, path: "transcript.json" } });
+    let analysis = reusable.analysis;
+    if (!analysis) {
+      await setJob(job, { status: "analyzing_highlights", progress: 90 });
+      analysis = await analyzeAndSave(job.id, transcript, job.paths.highlights);
+    }
 
     await setJob(job, {
       status: "completed",
@@ -359,36 +366,53 @@ async function processJob(job: JobRecord) {
 
 export class JobStore {
   private readonly jobs = new Map<string, JobRecord>();
+  private queue = Promise.resolve();
+  private registration = Promise.resolve();
+  private readonly contentHashes = new Map<string, string>();
+  private readonly idempotencyKeys = new Map<string, string>();
+  private readonly workspace: string;
+  private readonly processor: (job: JobRecord) => Promise<void>;
   readonly ready: Promise<void>;
 
-  constructor() {
+  constructor(workspace = workspaceRoot, processor = processJob) {
+    this.workspace = workspace;
+    this.processor = processor;
     this.ready = this.load();
   }
 
+  private enqueue(job: JobRecord) {
+    this.queue = this.queue.then(() => this.processor(job)).catch(async (error) => {
+      await setJob(job, { status: "failed", progress: 100, error: error instanceof Error ? error.message : String(error) });
+    });
+  }
+
+  async waitForIdle() { await this.queue; }
+
   private async load() {
-    await fs.mkdir(workspaceRoot, { recursive: true });
-    const entries = await fs.readdir(workspaceRoot, { withFileTypes: true });
-    await Promise.all(
-      entries
-        .filter((entry) => entry.isDirectory())
-        .map(async (entry) => {
+    await fs.mkdir(this.workspace, { recursive: true });
+    const entries = await fs.readdir(this.workspace, { withFileTypes: true });
+    const interrupted: JobRecord[] = [];
+    await Promise.all(entries.filter((entry) => entry.isDirectory()).map(async (entry) => {
           try {
-            const metadataPath = path.join(workspaceRoot, entry.name, "job.json");
+            const metadataPath = path.join(this.workspace, entry.name, "job.json");
             const job = JSON.parse(await fs.readFile(metadataPath, "utf8")) as JobRecord;
             job.paths.highlights ??= path.join(job.paths.directory, "highlights.json");
             if (job.status !== "completed" && job.status !== "failed") {
-              job.status = "failed";
-              job.progress = 100;
-              job.error = "The server restarted before this job finished.";
+              job.status = "queued";
+              job.progress = Math.min(95, job.progress);
+              job.error = null;
               job.updatedAt = now();
               await writeJob(job);
+              interrupted.push(job);
             }
             this.jobs.set(job.id, job);
+            if (job.contentHash) this.contentHashes.set(job.contentHash, job.id);
+            if (job.idempotencyKey) this.idempotencyKeys.set(job.idempotencyKey, job.id);
           } catch {
             // Ignore incomplete job directories.
           }
-        }),
-    );
+        }));
+    interrupted.sort((a, b) => a.createdAt.localeCompare(b.createdAt)).forEach((job) => this.enqueue(job));
   }
 
   list() {
@@ -408,7 +432,7 @@ export class JobStore {
 
   async create(filename: string, request: Request) {
     const id = randomUUID();
-    const directory = path.join(workspaceRoot, id);
+    const directory = path.join(this.workspace, id);
     const input = path.join(directory, "input", safeFilename(filename));
     const audio = path.join(directory, "audio.wav");
     const transcript = path.join(directory, "transcript.json");
@@ -429,9 +453,39 @@ export class JobStore {
 
     await fs.mkdir(path.dirname(input), { recursive: true });
     await this.writeUpload(request, input);
-    this.jobs.set(id, job);
-    await writeJob(job);
-    queue = queue.then(() => processJob(job));
+    const contentHash = await hashFile(input);
+    const rawIdempotencyKey = request.header("Idempotency-Key")?.trim();
+    const idempotencyKey = rawIdempotencyKey && rawIdempotencyKey.length <= 200 ? rawIdempotencyKey : undefined;
+    const previousRegistration = this.registration;
+    let releaseRegistration!: () => void;
+    const registrationDone = new Promise<void>((resolve) => { releaseRegistration = resolve; });
+    this.registration = previousRegistration.then(() => registrationDone);
+    await previousRegistration;
+    try {
+      const duplicateId = (idempotencyKey ? this.idempotencyKeys.get(idempotencyKey) : undefined) ?? this.contentHashes.get(contentHash);
+      if (duplicateId) {
+        await fs.rm(directory, { recursive: true, force: true });
+        const existing = this.jobs.get(duplicateId);
+        if (existing) return publicJob(existing);
+      }
+      job.contentHash = contentHash;
+      job.idempotencyKey = idempotencyKey;
+      this.jobs.set(id, job);
+      await writeJob(job);
+      this.contentHashes.set(contentHash, id);
+      if (idempotencyKey) this.idempotencyKeys.set(idempotencyKey, id);
+      this.enqueue(job);
+      return publicJob(job);
+    } finally {
+      releaseRegistration();
+    }
+  }
+
+  async retry(id: string) {
+    const job = this.jobs.get(id);
+    if (!job || job.status !== "failed") return undefined;
+    await setJob(job, { status: "queued", progress: 0, error: null });
+    this.enqueue(job);
     return publicJob(job);
   }
 

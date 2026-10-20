@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from 'react';
 import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
-import { useAnalyzeHighlights, useCreateJob, useGetHighlights, useGetJob, useGetTranscript, useHealthCheck, useListJobs, useUpdateHighlightCandidate, getGetHighlightsQueryKey, getGetJobQueryKey, getGetTranscriptQueryKey, getListJobsQueryKey, type HighlightAnalysis, type HighlightCandidate, type Job, type JobStatus, type TranscriptSegment, type TranscriptWord } from '@workspace/api-client-react';
+import { useAnalyzeHighlights, useGetHighlights, useGetJob, useGetTranscript, useHealthCheck, useListJobs, useUpdateHighlightCandidate, getGetHighlightsQueryKey, getGetJobQueryKey, getGetTranscriptQueryKey, getListJobsQueryKey, type HighlightAnalysis, type HighlightCandidate, type Job, type JobStatus, type TranscriptSegment, type TranscriptWord } from '@workspace/api-client-react';
 import { Activity, AlertCircle, AudioLines, Check, ChevronDown, Clock3, FileVideo, Film, HardDrive, Inbox, Languages, Loader2, LockKeyhole, MoreHorizontal, RefreshCw, RotateCcw, Save, Scissors, Sparkles, UploadCloud, Video, X } from 'lucide-react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { Toaster } from '@/components/ui/toaster';
@@ -37,7 +37,7 @@ function titleForStatus(status: JobStatus) {
 
 function statusDetail(status: JobStatus) {
   const details: Record<JobStatus, string> = {
-    queued: 'Your file is next in line.',
+    queued: 'Waiting in the local queue. One video is processed at a time to keep FFmpeg resource use controlled.',
     validating: 'Checking the media stream and duration.',
     extracting_audio: 'Separating a clean local audio track.',
     transcribing: 'Matching words to their exact moments.',
@@ -53,7 +53,7 @@ function StatusDot({ status }: { status: JobStatus }) {
   return <span className={`relative inline-flex h-2 w-2 shrink-0 rounded-full ${tone}`}><span className={`absolute inset-0 rounded-full ${status === 'completed' || status === 'failed' ? '' : 'animate-ping bg-inherit opacity-70'}`} /></span>;
 }
 
-function JobRow({ job, selected, onSelect }: { job: Job; selected: boolean; onSelect: () => void }) {
+function JobRow({ job, selected, onSelect, queuePosition }: { job: Job; selected: boolean; onSelect: () => void; queuePosition: number | null }) {
   return (
     <button type="button" onClick={onSelect} data-testid={`button-select-job-${job.id}`} className={`group flex w-full items-center gap-3 border-b border-sidebar-border px-4 py-3.5 text-left transition-colors ${selected ? 'bg-sidebar-accent' : 'hover:bg-sidebar-accent/60'}`}>
       <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg ${selected ? 'bg-[hsl(var(--primary))] text-[hsl(var(--primary-foreground))]' : 'bg-sidebar-accent text-sidebar-foreground/75'}`}>
@@ -63,7 +63,7 @@ function JobRow({ job, selected, onSelect }: { job: Job; selected: boolean; onSe
         <p className="truncate text-[13px] font-semibold text-sidebar-foreground" data-testid={`text-job-filename-${job.id}`}>{job.filename}</p>
         <div className="mt-1 flex items-center gap-1.5 text-[11px] text-sidebar-foreground/55">
           <StatusDot status={job.status} />
-          <span>{titleForStatus(job.status)}</span>
+          <span>{job.status === 'queued' && queuePosition ? `Queued · ${queuePosition} in line` : titleForStatus(job.status)}</span>
           {job.durationSeconds ? <><span className="opacity-40">·</span><span>{formatTime(job.durationSeconds)}</span></> : null}
         </div>
       </div>
@@ -72,29 +72,33 @@ function JobRow({ job, selected, onSelect }: { job: Job; selected: boolean; onSe
   );
 }
 
-function DropZone({ file, onFile, onClear, onInvalid }: { file: File | null; onFile: (file: File) => void; onClear: () => void; onInvalid: () => void }) {
+function DropZone({ files, onFiles, onClear, onInvalid }: { files: File[]; onFiles: (files: File[]) => void; onClear: () => void; onInvalid: () => void }) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
-  const acceptFile = (nextFile?: File) => {
-    if (nextFile && (nextFile.type.startsWith('video/') || /\.(mp4|mov|webm|m4v|avi)$/i.test(nextFile.name))) onFile(nextFile);
-    else if (nextFile) onInvalid();
+  const acceptFiles = (incoming: FileList | File[]) => {
+    const nextFiles = Array.from(incoming);
+    const accepted = nextFiles.filter((file) => file.type.startsWith('video/') || /\.(mp4|mov|webm|m4v|avi)$/i.test(file.name));
+    if (accepted.length) onFiles([...files, ...accepted]);
+    if (accepted.length !== nextFiles.length) onInvalid();
   };
   const onDrop = (event: DragEvent<HTMLDivElement>) => {
     event.preventDefault();
     setDragging(false);
-    acceptFile(event.dataTransfer.files[0]);
+    acceptFiles(event.dataTransfer.files);
   };
   return (
     <div className={`relative overflow-hidden rounded-2xl border border-dashed transition-all ${dragging ? 'border-[hsl(var(--primary))] bg-[hsl(var(--primary)/.09)]' : 'border-[hsl(var(--foreground)/.16)] bg-[hsl(var(--card))] hover:border-[hsl(var(--primary)/.65)]'}`} onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={onDrop} data-testid="dropzone-video">
-      <input ref={inputRef} type="file" accept="video/*,.mp4,.mov,.webm" className="hidden" data-testid="input-video-file" onChange={(event) => acceptFile(event.target.files?.[0])} />
-      {file ? (
+      <input ref={inputRef} type="file" multiple accept="video/*,.mp4,.mov,.webm,.m4v,.avi" className="hidden" data-testid="input-video-file" onChange={(event) => { if (event.target.files) acceptFiles(event.target.files); event.target.value = ''; }} />
+      {files.length ? (
         <div className="flex items-center gap-4 px-5 py-5">
           <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-[hsl(var(--primary)/.16)] text-[hsl(var(--primary-foreground))]"><Film size={22} className="text-[hsl(var(--primary))]" /></div>
           <div className="min-w-0 flex-1">
-            <p className="truncate text-sm font-bold" data-testid="text-selected-filename">{file.name}</p>
-            <p className="mt-1 font-mono text-[11px] text-muted-foreground">{formatBytes(file.size)} · {file.type || 'video file'} · local only</p>
+            <p className="truncate text-sm font-bold" data-testid="text-selected-filename">{files.length} video{files.length === 1 ? '' : 's'} selected</p>
+            <p className="mt-1 truncate font-mono text-[11px] text-muted-foreground">{files.slice(0, 3).map((file) => file.name).join(' · ')}{files.length > 3 ? ` · +${files.length - 3} more` : ''}</p>
+            <p className="mt-1 font-mono text-[10px] text-muted-foreground">Queued locally · one job processes at a time</p>
           </div>
-          <button type="button" onClick={onClear} aria-label="Remove selected video" data-testid="button-clear-file" className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"><X size={17} /></button>
+          <button type="button" onClick={() => inputRef.current?.click()} className="shrink-0 rounded-lg border border-border px-2.5 py-2 text-[10px] font-bold text-muted-foreground hover:bg-muted hover:text-foreground">Add videos</button>
+          <button type="button" onClick={onClear} aria-label="Remove selected videos" data-testid="button-clear-file" className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"><X size={17} /></button>
         </div>
       ) : (
         <button type="button" onClick={() => inputRef.current?.click()} data-testid="button-browse-video" className="flex w-full flex-col items-center justify-center px-6 py-12 text-center">
@@ -330,7 +334,10 @@ function HighlightCandidateRow({ candidate, selected, onSelect }: { candidate: H
 
 function Home() {
   const queryClient = useQueryClient();
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const [uploading, setUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState('');
+  const uploadKeys = useRef(new WeakMap<File, string>());
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const jobsQuery = useListJobs({ query: { queryKey: getListJobsQueryKey() } });
@@ -343,24 +350,49 @@ function Home() {
   const highlightsQuery = useGetHighlights(activeId, { query: { enabled: Boolean(activeId) && selectedJob?.status === 'completed', queryKey: getGetHighlightsQueryKey(activeId), retry: false } });
   const analyzeHighlights = useAnalyzeHighlights();
   const healthQuery = useHealthCheck({ query: { queryKey: ['/api/healthz'], staleTime: 30_000 } });
-  const createJob = useCreateJob({ request: { headers: selectedFile ? { 'X-File-Name': selectedFile.name } : undefined } });
 
   useEffect(() => {
     if (!selectedJobId && jobs[0]) setSelectedJobId(jobs[0].id);
   }, [jobs, selectedJobId]);
 
-  const chooseFile = useCallback((file: File) => { setSelectedFile(file); setUploadError(null); }, []);
-  const upload = () => {
-    if (!selectedFile) return;
+  const chooseFiles = useCallback((files: File[]) => { setSelectedFiles(files); setUploadError(null); }, []);
+  const upload = async () => {
+    if (!selectedFiles.length || uploading) return;
     setUploadError(null);
-    createJob.mutate({ data: selectedFile }, {
-      onSuccess: (job) => {
-        setSelectedFile(null);
-        setSelectedJobId(job.id);
-        void queryClient.invalidateQueries({ queryKey: getListJobsQueryKey() });
-      },
-      onError: (error) => setUploadError(error instanceof Error ? error.message : 'Upload could not be started.'),
-    });
+    setUploading(true);
+    const successfulJobs: Job[] = [];
+    const failedFiles: File[] = [];
+    const failures: string[] = [];
+    for (const [index, file] of selectedFiles.entries()) {
+      setUploadProgress(`Adding ${index + 1} of ${selectedFiles.length} · ${file.name}`);
+      try {
+        const idempotencyKey = uploadKeys.current.get(file) ?? crypto.randomUUID();
+        uploadKeys.current.set(file, idempotencyKey);
+        const response = await fetch('/api/jobs', { method: 'POST', headers: { 'Content-Type': 'application/octet-stream', 'X-File-Name': file.name, 'Idempotency-Key': idempotencyKey }, body: file });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Could not add ${file.name}.`);
+        successfulJobs.push(result as Job);
+      } catch (error) {
+        failedFiles.push(file);
+        failures.push(`${file.name}: ${error instanceof Error ? error.message : 'Upload failed.'}`);
+      }
+    }
+    if (successfulJobs.length) {
+      setSelectedJobId(successfulJobs.at(-1)!.id);
+      void queryClient.invalidateQueries({ queryKey: getListJobsQueryKey() });
+    }
+    setSelectedFiles(failedFiles);
+    setUploadError(failures.length ? `${successfulJobs.length} video${successfulJobs.length === 1 ? '' : 's'} queued; ${failures.length} failed. ${failures.join(' · ')}` : null);
+    setUploadProgress('');
+    setUploading(false);
+  };
+  const retryJob = async (jobId: string) => {
+    try {
+      const response = await fetch(`/api/jobs/${jobId}/retry`, { method: 'POST' });
+      if (!response.ok) throw new Error((await response.json()).error || 'Retry could not be queued.');
+      await queryClient.invalidateQueries({ queryKey: getListJobsQueryKey() });
+      await queryClient.invalidateQueries({ queryKey: getGetJobQueryKey(jobId) });
+    } catch (error) { setUploadError(error instanceof Error ? error.message : 'Retry could not be queued.'); }
   };
   const refresh = () => {
     void queryClient.invalidateQueries({ queryKey: getListJobsQueryKey() });
@@ -383,7 +415,7 @@ function Home() {
             <div><p className="text-[15px] font-extrabold tracking-[-.02em]">Shorts Studio</p><p className="font-mono text-[9px] uppercase tracking-[.18em] text-sidebar-foreground/50">local workbench</p></div>
           </div>
           <div className="flex items-center justify-between px-5 pb-3 pt-6"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-sidebar-foreground/45">Your sessions</p><span className="rounded-full bg-sidebar-accent px-2 py-0.5 font-mono text-[10px] text-sidebar-foreground/65" data-testid="text-job-count">{jobs.length}</span></div>
-          <div className="flex-1 overflow-y-auto">{jobsQuery.isLoading ? <div className="space-y-2 px-4 py-2">{[1, 2, 3].map((item) => <div key={item} className="h-14 animate-pulse rounded-xl bg-sidebar-accent/70" />)}</div> : jobsQuery.isError ? <div className="px-5 py-6 text-xs text-sidebar-foreground/65"><AlertCircle size={18} className="mb-2 text-[hsl(var(--accent))]" /><p>Sessions could not be loaded.</p><button type="button" onClick={() => void jobsQuery.refetch()} data-testid="button-retry-jobs" className="mt-3 font-semibold text-[hsl(var(--primary))]">Try again</button></div> : hasJobs ? jobs.map((job) => <JobRow key={job.id} job={job} selected={job.id === activeId} onSelect={() => setSelectedJobId(job.id)} />) : <div className="px-5 py-8 text-center"><Inbox size={22} className="mx-auto mb-3 text-sidebar-foreground/35" /><p className="text-xs leading-5 text-sidebar-foreground/55">Your processed videos<br />will live here.</p></div>}</div>
+          <div className="flex-1 overflow-y-auto">{jobsQuery.isLoading ? <div className="space-y-2 px-4 py-2">{[1, 2, 3].map((item) => <div key={item} className="h-14 animate-pulse rounded-xl bg-sidebar-accent/70" />)}</div> : jobsQuery.isError ? <div className="px-5 py-6 text-xs text-sidebar-foreground/65"><AlertCircle size={18} className="mb-2 text-[hsl(var(--accent))]" /><p>Sessions could not be loaded.</p><button type="button" onClick={() => void jobsQuery.refetch()} data-testid="button-retry-jobs" className="mt-3 font-semibold text-[hsl(var(--primary))]">Try again</button></div> : hasJobs ? jobs.map((job) => { const queuePosition = job.status === 'queued' ? jobs.filter((queued) => queued.status === 'queued' && queued.createdAt <= job.createdAt).length : null; return <JobRow key={job.id} job={job} selected={job.id === activeId} queuePosition={queuePosition} onSelect={() => setSelectedJobId(job.id)} />; }) : <div className="px-5 py-8 text-center"><Inbox size={22} className="mx-auto mb-3 text-sidebar-foreground/35" /><p className="text-xs leading-5 text-sidebar-foreground/55">Your processed videos<br />will live here.</p></div>}</div>
           <div className="border-t border-sidebar-border p-4"><div className="flex items-center gap-2.5 rounded-xl bg-sidebar-accent/60 px-3 py-3"><LockKeyhole size={14} className="text-emerald-400" /><div className="min-w-0"><p className="text-[11px] font-semibold text-sidebar-foreground">Private by design</p><p className="truncate text-[10px] text-sidebar-foreground/45">Files never leave this machine</p></div></div></div>
         </aside>
         <main className="min-w-0 flex-1">
@@ -397,14 +429,14 @@ function Home() {
               <div className="animate-rise-in"><p className="font-mono text-[10px] font-medium uppercase tracking-[.2em] text-[hsl(var(--accent))]">01 / Ingest</p><h1 className="mt-3 max-w-2xl text-3xl font-extrabold leading-[1.08] tracking-[-.05em] sm:text-5xl">Turn a clip into<br /><span className="text-[hsl(var(--muted-foreground))]">something searchable.</span></h1><p className="mt-4 max-w-lg text-sm leading-6 text-muted-foreground">Bring in a short-form video. Shorts Studio validates the media, pulls its audio, and maps every spoken word — locally.</p></div>
               <div className="mt-8 grid gap-6 lg:grid-cols-[minmax(0,1.05fr)_minmax(310px,.75fr)]">
                 <div>
-                  <DropZone file={selectedFile} onFile={chooseFile} onClear={() => setSelectedFile(null)} onInvalid={() => setUploadError('Choose a supported video file: MP4, MOV, or WEBM.')} />
+                  <DropZone files={selectedFiles} onFiles={chooseFiles} onClear={() => setSelectedFiles([])} onInvalid={() => setUploadError('Some files were skipped. Choose supported videos: MP4, MOV, WEBM, M4V, or AVI.')} />
                   {uploadError ? <div className="mt-3 flex items-start gap-2.5 rounded-xl border border-red-500/25 bg-red-500/7 px-4 py-3 text-xs text-red-700 dark:text-red-300" data-testid="error-upload"><AlertCircle size={16} className="mt-0.5 shrink-0" /><div><p className="font-semibold">Upload could not start</p><p className="mt-0.5 opacity-80">{uploadError}</p></div></div> : null}
                   <div className="mt-3 flex items-center gap-2 text-[11px] text-muted-foreground"><LockKeyhole size={13} className="text-emerald-600" /><span>Local-first: your original file stays in your browser and local API.</span></div>
-                  <button type="button" disabled={!selectedFile || createJob.isPending} onClick={upload} data-testid="button-start-processing" className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-extrabold text-[hsl(var(--primary-foreground))] shadow-[0_8px_22px_hsl(var(--primary)/.22)] transition-all hover:-translate-y-0.5 hover:shadow-[0_11px_27px_hsl(var(--primary)/.28)] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:translate-y-0">{createJob.isPending ? <><Loader2 size={17} className="animate-spin" /> Starting local job…</> : <><UploadCloud size={17} /> Start processing</>}</button>
+                  <button type="button" disabled={!selectedFiles.length || uploading} onClick={() => void upload()} data-testid="button-start-processing" className="mt-6 flex w-full items-center justify-center gap-2 rounded-xl bg-[hsl(var(--primary))] px-5 py-3.5 text-sm font-extrabold text-[hsl(var(--primary-foreground))] shadow-[0_8px_22px_hsl(var(--primary)/.22)] transition-all hover:-translate-y-0.5 hover:shadow-[0_11px_27px_hsl(var(--primary)/.28)] disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:translate-y-0">{uploading ? <><Loader2 size={17} className="animate-spin" /> {uploadProgress || 'Adding to queue…'}</> : <><UploadCloud size={17} /> {selectedFiles.length > 1 ? `Queue ${selectedFiles.length} videos` : 'Start processing'}</>}</button>
                 </div>
                 <div className="rounded-2xl border border-border bg-card/75 p-5 backdrop-blur-sm"><div className="flex items-center justify-between"><p className="font-mono text-[10px] uppercase tracking-[.18em] text-muted-foreground">Pipeline</p><span className="font-mono text-[10px] text-emerald-700 dark:text-emerald-400">on-device</span></div><div className="mt-6 space-y-0">{[['01', 'Validate', 'Video stream + duration'], ['02', 'Extract', 'Clean audio track'], ['03', 'Transcribe', 'Word-level timestamps']].map(([number, title, sub], index) => <div key={number} className="relative flex gap-3 pb-7 last:pb-0"><div className="relative z-10 flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[hsl(var(--primary)/.45)] bg-[hsl(var(--primary)/.1)] font-mono text-[10px] text-[hsl(var(--primary-foreground))]">{index === 2 ? <Sparkles size={13} className="text-[hsl(var(--primary))]" /> : number}</div>{index < 2 ? <span className="absolute left-[13px] top-7 h-full w-px bg-border" /> : null}<div><p className="text-sm font-bold">{title}</p><p className="mt-1 text-xs text-muted-foreground">{sub}</p></div></div>)}</div><div className="mt-7 border-t border-border pt-4 text-[11px] leading-5 text-muted-foreground">Nothing is uploaded to a third party. You can close the tab after processing and the session remains in your local workspace.</div></div>
               </div>
-              {displayJob ? <div className="mt-10 border-t border-border pt-8"><div className="flex flex-wrap items-end justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-[hsl(var(--accent))]">02 / Active session</p><h2 className="mt-2 max-w-xl truncate text-xl font-extrabold tracking-[-.03em] sm:text-2xl" data-testid="text-active-job">{displayJob.filename}</h2></div><div className="flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5"><StatusDot status={displayJob.status} /><span className="text-xs font-semibold">{titleForStatus(displayJob.status)}</span></div></div>{displayJob.status === 'failed' ? <div className="mt-5 flex items-start gap-3 rounded-2xl border border-red-500/25 bg-red-500/7 p-4 text-sm" data-testid="error-job"><AlertCircle className="mt-0.5 shrink-0 text-red-600" size={18} /><div><p className="font-bold text-red-800 dark:text-red-300">This job needs attention</p><p className="mt-1 text-xs leading-5 text-red-700/80 dark:text-red-300/80">{displayJob.error || 'The local processor returned an unknown error.'}</p><button type="button" onClick={() => { setSelectedFile(null); setUploadError(null); }} data-testid="button-dismiss-error" className="mt-3 flex items-center gap-1.5 text-xs font-bold text-red-800 dark:text-red-300"><RotateCcw size={13} /> Choose another file</button></div></div> : displayJob.status !== 'completed' ? <ProcessingRail job={displayJob} /> : transcriptQuery.isLoading ? <div className="mt-7 h-48 animate-pulse rounded-2xl bg-card" data-testid="skeleton-transcript" /> : transcriptQuery.isError ? <div className="mt-7 rounded-2xl border border-border bg-card p-8 text-center" data-testid="error-transcript"><AlertCircle size={22} className="mx-auto mb-2 text-[hsl(var(--accent))]" /><p className="text-sm font-bold">Transcript is not available yet</p><button type="button" onClick={() => void transcriptQuery.refetch()} data-testid="button-retry-transcript" className="mt-3 text-xs font-bold text-[hsl(var(--accent))]">Try again</button></div> : transcriptQuery.data ? <><TranscriptViewer segmentList={transcriptQuery.data.segments} language={transcriptQuery.data.language} duration={transcriptQuery.data.durationSeconds} /><HighlightPanel jobId={activeId} duration={transcriptQuery.data.durationSeconds} analysis={highlightsQuery.data} isLoading={highlightsQuery.isLoading} isError={highlightsQuery.isError} isAnalyzing={analyzeHighlights.isPending} onAnalyze={runHighlightAnalysis} /></> : null}</div> : <div className="mt-12 rounded-2xl border border-border bg-card/45 px-6 py-10 text-center"><div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-muted text-muted-foreground"><HardDrive size={20} /></div><p className="mt-4 text-sm font-bold" data-testid="empty-active-job">No session selected</p><p className="mt-1 text-xs text-muted-foreground">Upload a video above to start your first local processing run.</p></div>}
+              {displayJob ? <div className="mt-10 border-t border-border pt-8"><div className="flex flex-wrap items-end justify-between gap-3"><div><p className="font-mono text-[10px] uppercase tracking-[.2em] text-[hsl(var(--accent))]">02 / Active session</p><h2 className="mt-2 max-w-xl truncate text-xl font-extrabold tracking-[-.03em] sm:text-2xl" data-testid="text-active-job">{displayJob.filename}</h2></div><div className="flex items-center gap-2 rounded-full border border-border bg-card px-3 py-1.5"><StatusDot status={displayJob.status} /><span className="text-xs font-semibold">{titleForStatus(displayJob.status)}</span></div></div>{displayJob.status === 'failed' ? <div className="mt-5 flex items-start gap-3 rounded-2xl border border-red-500/25 bg-red-500/7 p-4 text-sm" data-testid="error-job"><AlertCircle className="mt-0.5 shrink-0 text-red-600" size={18} /><div><p className="font-bold text-red-800 dark:text-red-300">This job needs attention</p><p className="mt-1 text-xs leading-5 text-red-700/80 dark:text-red-300/80">{displayJob.error || 'The local processor returned an unknown error.'}</p><button type="button" onClick={() => void retryJob(displayJob.id)} data-testid="button-retry-job" className="mt-3 flex items-center gap-1.5 text-xs font-bold text-red-800 dark:text-red-300"><RotateCcw size={13} /> Retry from saved work</button></div></div> : displayJob.status !== 'completed' ? <ProcessingRail job={displayJob} /> : transcriptQuery.isLoading ? <div className="mt-7 h-48 animate-pulse rounded-2xl bg-card" data-testid="skeleton-transcript" /> : transcriptQuery.isError ? <div className="mt-7 rounded-2xl border border-border bg-card p-8 text-center" data-testid="error-transcript"><AlertCircle size={22} className="mx-auto mb-2 text-[hsl(var(--accent))]" /><p className="text-sm font-bold">Transcript is not available yet</p><button type="button" onClick={() => void transcriptQuery.refetch()} data-testid="button-retry-transcript" className="mt-3 text-xs font-bold text-[hsl(var(--accent))]">Try again</button></div> : transcriptQuery.data ? <><TranscriptViewer segmentList={transcriptQuery.data.segments} language={transcriptQuery.data.language} duration={transcriptQuery.data.durationSeconds} /><HighlightPanel jobId={activeId} duration={transcriptQuery.data.durationSeconds} analysis={highlightsQuery.data} isLoading={highlightsQuery.isLoading} isError={highlightsQuery.isError} isAnalyzing={analyzeHighlights.isPending} onAnalyze={runHighlightAnalysis} /></> : null}</div> : <div className="mt-12 rounded-2xl border border-border bg-card/45 px-6 py-10 text-center"><div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-muted text-muted-foreground"><HardDrive size={20} /></div><p className="mt-4 text-sm font-bold" data-testid="empty-active-job">No session selected</p><p className="mt-1 text-xs text-muted-foreground">Upload a video above to start your first local processing run.</p></div>}
             </div>
           </div>
         </main>
